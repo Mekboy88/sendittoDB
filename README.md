@@ -10,12 +10,48 @@ This project is **completely separate** from the Senditto Platform (email produc
 - Connection details live only in local env / operator secrets (not committed).
 - `.env.local` is gitignored.
 
-## Run
+## Run (full local stack)
 
 ```bash
-# create .env.local with VITE_DB_API_BASE and VITE_DB_API_TOKEN (do not commit)
 npm install
+
+# 1. Start the local dev API (seeded, DEV ONLY — port 5181)
+npm run api
+
+# 2. In another terminal, start the studio (port 5180)
 npm run dev
 ```
 
-Opens on `http://localhost:5180`.
+Create `.env.local` (not committed):
+
+```
+VITE_DB_API_BASE=http://localhost:5181
+VITE_DEFAULT_EMAIL=owner@senditto.dev
+VITE_DEFAULT_PASSWORD=senditto-owner
+```
+
+Open `http://localhost:5180` and sign in with the dev owner account above.
+
+## Local dev API (`server/`)
+
+`server/index.mjs` is a zero-dependency Node server that implements the full
+Senditto control-plane contract the studio expects — auth + sessions, `/api/stats`,
+`/api/db/realtime` (SSE), Postgres-style table introspection, and CRUD for users,
+workspaces, domains, API keys, messages, suppressions, audit, rights requests,
+contacts, templates, campaigns, webhooks, internal messages and both role
+matrices. State persists to `server/data/db.json` (gitignored) and is seeded
+with realistic sample data on first boot.
+
+It is the **executable specification** for the production backend
+(Node + PostgreSQL) — same routes, same payloads, real database behind it.
+Grant-role and matrix edits accept any 6-digit code in dev.
+
+## Pages
+
+- **Core** — Overview (live stats + SSE feed), Tables (schema explorer)
+- **Platform** — User workspaces, Users, Matrix (platform roles), Workspace roles,
+  Domains, API keys, Messages
+- **Product** — Contacts, Templates, Campaigns, Webhooks, Operator inbox
+- **Compliance** — Suppressions (incl. “record user opt-out” support flow),
+  Audit log, Rights requests
+- **Ops** — Server health, Sessions, Settings (theme, refresh interval)

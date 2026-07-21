@@ -2,21 +2,27 @@ import { useCallback, useEffect, useState } from "react";
 import {
   Activity,
   Ban,
+  Contact,
   Database,
+  FileText,
   Globe,
   Grid3x3,
+  Inbox,
   KeyRound,
   LayoutDashboard,
   LogOut,
   Mail,
+  Megaphone,
   RefreshCw,
   Server,
   Shield,
+  ShieldCheck,
   Table2,
   Users,
   Layers,
   ScrollText,
   Settings,
+  Webhook,
 } from "lucide-react";
 import { api, loadSession, openRealtime, redact, saveSession } from "./api.js";
 import { roleLabel } from "./roles.js";
@@ -37,8 +43,17 @@ import {
   UsersPage,
   WorkspacesPage,
 } from "./pages.jsx";
+import {
+  CampaignsPage,
+  ContactsPage,
+  InboxPage,
+  TemplatesPage,
+  WebhooksPage,
+  WorkspaceMatrixPage,
+} from "./pages-platform.jsx";
 
 const THEME_KEY = "senditto_db_studio_theme";
+const POLL_KEY = "senditto_db_studio_poll";
 
 /** Resolve Auto → light|dark from OS, else by local clock (day 7–19 light). */
 export function resolveTheme(pref) {
@@ -75,9 +90,15 @@ const NAV = [
   { id: "workspaces", label: "User workspaces", icon: Layers, group: "Platform" },
   { id: "users", label: "Users", icon: Users, group: "Platform" },
   { id: "matrix", label: "Matrix", icon: Grid3x3, group: "Platform" },
+  { id: "wsroles", label: "Workspace roles", icon: ShieldCheck, group: "Platform" },
   { id: "domains", label: "Domains", icon: Globe, group: "Platform" },
   { id: "keys", label: "API keys", icon: KeyRound, group: "Platform" },
   { id: "messages", label: "Messages", icon: Mail, group: "Platform" },
+  { id: "contacts", label: "Contacts", icon: Contact, group: "Product" },
+  { id: "templates", label: "Templates", icon: FileText, group: "Product" },
+  { id: "campaigns", label: "Campaigns", icon: Megaphone, group: "Product" },
+  { id: "webhooks", label: "Webhooks", icon: Webhook, group: "Product" },
+  { id: "inbox", label: "Operator inbox", icon: Inbox, group: "Product" },
   { id: "suppressions", label: "Suppressions", icon: Ban, group: "Compliance" },
   { id: "audit", label: "Audit log", icon: ScrollText, group: "Compliance" },
   { id: "rights", label: "Rights requests", icon: Shield, group: "Compliance" },
@@ -164,6 +185,23 @@ export default function App() {
   // Preference: light | dark | auto (never grey)
   const [themePref, setThemePref] = useState(() => loadThemePref());
   const [resolvedTheme, setResolvedTheme] = useState(() => resolveTheme(loadThemePref()));
+  const [pollMs, setPollMs] = useState(() => {
+    try {
+      const v = Number(localStorage.getItem(POLL_KEY));
+      return [5000, 10000, 30000, 60000].includes(v) ? v : 10000;
+    } catch {
+      return 10000;
+    }
+  });
+
+  const changePoll = useCallback((v) => {
+    setPollMs(v);
+    try {
+      localStorage.setItem(POLL_KEY, String(v));
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   const token = session?.token;
 
@@ -228,12 +266,12 @@ export default function App() {
       if (ev.type === "overview" && ev.data) setOverview(ev.data);
       setEvents((prev) => [{ ...ev, at: ev.at || new Date().toISOString() }, ...prev].slice(0, 100));
     });
-    const poll = setInterval(refresh, 10000);
+    const poll = setInterval(refresh, pollMs);
     return () => {
       stop();
       clearInterval(poll);
     };
-  }, [token, refresh]);
+  }, [token, refresh, pollMs]);
 
   async function logout() {
     try {
@@ -336,6 +374,12 @@ export default function App() {
           {page === "matrix" ? (
             <MatrixPage token={token} session={session} onNavigate={setPage} />
           ) : null}
+          {page === "wsroles" ? <WorkspaceMatrixPage token={token} onChanged={refresh} /> : null}
+          {page === "contacts" ? <ContactsPage token={token} onChanged={refresh} /> : null}
+          {page === "templates" ? <TemplatesPage token={token} onChanged={refresh} /> : null}
+          {page === "campaigns" ? <CampaignsPage token={token} onChanged={refresh} /> : null}
+          {page === "webhooks" ? <WebhooksPage token={token} onChanged={refresh} /> : null}
+          {page === "inbox" ? <InboxPage token={token} session={session} onChanged={refresh} /> : null}
           {page === "domains" ? <DomainsPage token={token} onChanged={refresh} /> : null}
           {page === "keys" ? (
             <KeysPage token={token} session={session} events={events} onChanged={refresh} />
@@ -375,6 +419,8 @@ export default function App() {
               themePref={themePref}
               resolvedTheme={resolvedTheme}
               onThemeChange={setThemePref}
+              pollMs={pollMs}
+              onPollChange={changePoll}
             />
           ) : null}
         </main>

@@ -91,7 +91,7 @@ import {
   fmt,
 } from "./ui.jsx";
 
-function useEntity(token, path) {
+export function useEntity(token, path) {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [err, setErr] = useState("");
@@ -2181,7 +2181,7 @@ function SetupRing({ score = 0, size = 120, stroke = 10 }) {
 }
 
 /** Three-dot menu — portaled to #app-layer so it is never clipped inside tables */
-function RowMenu({ items = [], label = "Actions" }) {
+export function RowMenu({ items = [], label = "Actions" }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState(null);
   const btnRef = useRef(null);
@@ -6612,6 +6612,8 @@ export function SuppressionsPage({ token, session, events = [], onChanged }) {
   const [busy, setBusy] = useState(false);
   const [guideOpen, setGuideOpen] = useState(false);
   const [detailId, setDetailId] = useState(null);
+  const [recordOpen, setRecordOpen] = useState(false);
+  const [recordForm, setRecordForm] = useState({ email: "", workspaceId: "", note: "", channel: "support_email" });
 
   const lastRt = useRef("");
   useEffect(() => {
@@ -6693,6 +6695,43 @@ export function SuppressionsPage({ token, session, events = [], onChanged }) {
       setMsg(res.fail ? `Unblocked ${res.ok}, failed ${res.fail}` : `Safety-unblocked ${res.ok} address${res.ok === 1 ? "" : "es"}`);
       if (detailId && ids.some((id) => String(id) === String(detailId))) setDetailId(null);
       bulk.clear();
+      await load();
+      onChanged?.();
+    } catch (ex) {
+      setMsg(redact(ex.message));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function recordOptOut(e) {
+    e.preventDefault();
+    const email = recordForm.email.trim();
+    if (!email) return;
+    const ok = await confirm({
+      title: "Record user opt-out",
+      message: `Record that ${email} asked (via support) to stop receiving mail?\n\nThis creates a real unsubscribe entry with source “support request”. Only do this when the recipient genuinely asked — the request text is stored verbatim for audit.`,
+      confirmLabel: "Record opt-out",
+    });
+    if (!ok) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      await api("/api/suppressions", {
+        method: "POST",
+        token,
+        body: {
+          email,
+          reason: "unsubscribe",
+          source: "support_request",
+          userNote: recordForm.note.trim(),
+          channel: recordForm.channel,
+          workspaceId: recordForm.workspaceId || undefined,
+        },
+      });
+      setMsg(`Recorded opt-out for ${email}`);
+      setRecordOpen(false);
+      setRecordForm({ email: "", workspaceId: "", note: "", channel: "support_email" });
       await load();
       onChanged?.();
     } catch (ex) {
@@ -6784,6 +6823,9 @@ export function SuppressionsPage({ token, session, events = [], onChanged }) {
           <>
             <button className="btn" type="button" onClick={() => setGuideOpen(true)}>
               <BookOpen size={15} /> How this works
+            </button>
+            <button className="btn" type="button" onClick={() => setRecordOpen(true)}>
+              <Plus size={15} /> Record user opt-out
             </button>
             <button className="btn" type="button" onClick={exportAllCsv} disabled={!filtered.length}>
               <Download size={15} /> Export CSV
@@ -7134,6 +7176,67 @@ export function SuppressionsPage({ token, session, events = [], onChanged }) {
               </div>
             </div>
           </div>
+        </Modal>
+      ) : null}
+
+      {recordOpen ? (
+        <Modal title="Record user opt-out (support request)" onClose={() => setRecordOpen(false)}>
+          <form onSubmit={recordOptOut}>
+            <p className="muted-sm" style={{ marginTop: 0 }}>
+              Use this only when a recipient asked support (email, phone, letter) to stop receiving mail. It records a
+              genuine unsubscribe on their behalf — source is stored as “support request” and is fully audited.
+            </p>
+            <div className="form">
+              <Field label="Recipient email" full>
+                <input
+                  type="email"
+                  required
+                  autoFocus
+                  value={recordForm.email}
+                  onChange={(e) => setRecordForm((f) => ({ ...f, email: e.target.value }))}
+                  placeholder="person@example.com"
+                />
+              </Field>
+              <Field label="Workspace">
+                <AppSelect
+                  value={recordForm.workspaceId}
+                  onChange={(v) => setRecordForm((f) => ({ ...f, workspaceId: v }))}
+                  options={[
+                    { value: "", label: "All workspaces (global)" },
+                    ...(workspaces.rows || []).map((w) => ({ value: String(w.id), label: w.name || w.id })),
+                  ]}
+                />
+              </Field>
+              <Field label="Request channel">
+                <AppSelect
+                  value={recordForm.channel}
+                  onChange={(v) => setRecordForm((f) => ({ ...f, channel: v }))}
+                  options={[
+                    { value: "support_email", label: "Support email" },
+                    { value: "support_phone", label: "Phone call" },
+                    { value: "support_chat", label: "Live chat" },
+                    { value: "letter", label: "Letter / postal" },
+                  ]}
+                />
+              </Field>
+              <Field label="What the user said (verbatim)" full>
+                <textarea
+                  rows={3}
+                  value={recordForm.note}
+                  onChange={(e) => setRecordForm((f) => ({ ...f, note: e.target.value }))}
+                  placeholder="“Please stop sending me marketing emails.”"
+                />
+              </Field>
+            </div>
+            <div className="grant-actions" style={{ marginTop: 16 }}>
+              <button className="btn" type="button" onClick={() => setRecordOpen(false)}>
+                Cancel
+              </button>
+              <button className="btn primary" type="submit" disabled={busy || !recordForm.email.trim()}>
+                {busy ? "Recording…" : "Record opt-out"}
+              </button>
+            </div>
+          </form>
         </Modal>
       ) : null}
 
@@ -9974,7 +10077,30 @@ export function MatrixPage({ token, session, onNavigate }) {
   );
 }
 
-export function SettingsPage({ themePref, resolvedTheme, onThemeChange }) {
+export function SettingsPage({ themePref, resolvedTheme, onThemeChange, pollMs = 10000, onPollChange }) {
+  const confirm = useAppConfirm();
+  const pollOptions = [
+    { value: "5000", label: "Every 5 seconds" },
+    { value: "10000", label: "Every 10 seconds (default)" },
+    { value: "30000", label: "Every 30 seconds" },
+    { value: "60000", label: "Every minute" },
+  ];
+  async function clearLocalCache() {
+    const ok = await confirm({
+      title: "Clear local studio data",
+      message:
+        "Remove locally stored studio preferences and cached session from this browser?\n\nYou will be signed out. Nothing on the server is touched.",
+      danger: true,
+      confirmLabel: "Clear & sign out",
+    });
+    if (!ok) return;
+    try {
+      localStorage.clear();
+    } catch {
+      /* ignore */
+    }
+    window.location.reload();
+  }
   const themes = [
     {
       id: "light",
@@ -10030,6 +10156,20 @@ export function SettingsPage({ themePref, resolvedTheme, onThemeChange }) {
           ))}
         </div>
       </Panel>
+      <Panel
+        title="Live refresh"
+        copy="How often the studio re-polls overview stats when the realtime stream is quiet. Realtime events always apply instantly."
+      >
+        <div className="form">
+          <Field label="Poll interval">
+            <AppSelect
+              value={String(pollMs)}
+              onChange={(v) => onPollChange?.(Number(v))}
+              options={pollOptions}
+            />
+          </Field>
+        </div>
+      </Panel>
       <Panel title="Security notes" copy="Network addresses and raw API hosts are never shown in this studio UI.">
         <div className="kv">
           <div>
@@ -10044,7 +10184,19 @@ export function SettingsPage({ themePref, resolvedTheme, onThemeChange }) {
             <span>Active theme</span>
             <b>{activeLabel}</b>
           </div>
+          <div>
+            <span>Realtime poll</span>
+            <b>{Math.round(pollMs / 1000)}s fallback</b>
+          </div>
         </div>
+      </Panel>
+      <Panel
+        title="Local data"
+        copy="The studio keeps only your theme, refresh preference and signed-in session in this browser."
+      >
+        <button className="btn danger" type="button" onClick={clearLocalCache}>
+          Clear local studio data…
+        </button>
       </Panel>
     </>
   );
