@@ -27,7 +27,6 @@ export function redact(text) {
 
 export async function api(path, { method = "GET", body, token } = {}) {
   const base = getApiBase();
-  if (!base) throw new Error("API base not configured in local env");
   const headers = {
     "Content-Type": "application/json",
     "X-Senditto-Client": "database-studio",
