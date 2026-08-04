@@ -10,6 +10,20 @@ This project is **completely separate** from the Senditto Platform (email produc
 - Connection details live only in local env / operator secrets (not committed).
 - `.env.local` is gitignored.
 
+## Production
+
+Set these environment variables for the API service (e.g. via a root-only
+`EnvironmentFile` — see `deploy/server-setup.sh`):
+
+```
+SEED_DEMO=0            # seed only the owner account, no demo data
+OWNER_EMAIL=...        # real owner login
+OWNER_PASSWORD=...     # real owner password (never commit this)
+```
+
+With `SEED_DEMO=0` the database starts with a single owner account and empty
+collections. The demo accounts below exist **only** in local dev mode.
+
 ## Run (full local stack)
 
 ```bash

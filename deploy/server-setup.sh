@@ -44,6 +44,29 @@ npm ci --no-audit --no-fund
 npm run build
 
 echo "==> Installing Studio API service"
+mkdir -p /etc/senditto
+if [ ! -f /etc/senditto/senditto.env ]; then
+  # No operator config yet: disable demo data and generate a random owner password.
+  GEN_PASS="$(openssl rand -base64 18 | tr -d '/+=')"
+  cat > /etc/senditto/senditto.env <<ENV
+SEED_DEMO=0
+OWNER_EMAIL=owner@senditto.dev
+OWNER_PASSWORD=${GEN_PASS}
+ENV
+  chmod 600 /etc/senditto/senditto.env
+  echo "!! Generated owner login: owner@senditto.dev / ${GEN_PASS}"
+  echo "!! Edit /etc/senditto/senditto.env to change it, then re-run this script."
+fi
+
+# Production mode (SEED_DEMO=0): wipe the seeded demo database so it reseeds
+# with only the configured owner account.
+if grep -q '^SEED_DEMO=0' /etc/senditto/senditto.env \
+  && [ -f /opt/senditto/sendittoDB/server/data/db.json ] \
+  && grep -q 'admin@senditto\.dev\|founder@acme\.dev\|cto@northwind\.io' /opt/senditto/sendittoDB/server/data/db.json; then
+  echo "==> Removing demo database (will reseed with owner account only)"
+  rm -f /opt/senditto/sendittoDB/server/data/db.json
+fi
+
 cat > /etc/systemd/system/senditto-db-api.service <<'UNIT'
 [Unit]
 Description=Senditto Database Studio API
@@ -53,6 +76,7 @@ After=network.target
 WorkingDirectory=/opt/senditto/sendittoDB
 ExecStart=/usr/bin/node server/index.mjs
 Environment=PORT=5181
+EnvironmentFile=-/etc/senditto/senditto.env
 Restart=always
 RestartSec=3
 

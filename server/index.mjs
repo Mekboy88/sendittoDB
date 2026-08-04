@@ -22,8 +22,10 @@ import { randomBytes } from "node:crypto";
 const PORT = Number(process.env.PORT || 5181);
 const DATA_DIR = join(dirname(fileURLToPath(import.meta.url)), "data");
 const DB_FILE = join(DATA_DIR, "db.json");
-const OWNER_EMAIL = process.env.DEV_OWNER_EMAIL || "owner@senditto.dev";
-const OWNER_PASSWORD = process.env.DEV_OWNER_PASSWORD || "senditto-owner";
+const OWNER_EMAIL = process.env.OWNER_EMAIL || process.env.DEV_OWNER_EMAIL || "owner@senditto.dev";
+const OWNER_PASSWORD = process.env.OWNER_PASSWORD || process.env.DEV_OWNER_PASSWORD || "senditto-owner";
+// SEED_DEMO=0 seeds only the owner account (production); default seeds full demo data (dev).
+const SEED_DEMO = process.env.SEED_DEMO !== "0";
 const START_TS = Date.now();
 
 /* ============================ tiny utils ============================ */
@@ -115,6 +117,11 @@ function seed() {
   };
 
   const owner = mkUser(OWNER_EMAIL, "Platform Owner", "owner", { password: OWNER_PASSWORD, company: "Senditto" });
+  if (!SEED_DEMO) {
+    owner.created_at = nowIso();
+    owner.last_seen = null;
+    return d;
+  }
   mkUser("admin@senditto.dev", "Andi Admin", "admin", { company: "Senditto" });
   mkUser("ops@senditto.dev", "Olga Operator", "operator", { company: "Senditto" });
   mkUser("support@senditto.dev", "Sami Support", "support", { company: "Senditto" });
@@ -1311,6 +1318,10 @@ createServer((req, res) => {
     }
   });
 }).listen(PORT, () => {
-  console.log(`Senditto dev API → http://localhost:${PORT}`);
-  console.log(`Studio login: ${OWNER_EMAIL} / ${OWNER_PASSWORD}  (DEV ONLY)`);
+  console.log(`Senditto API → http://localhost:${PORT}`);
+  if (SEED_DEMO && OWNER_PASSWORD === "senditto-owner") {
+    console.log(`Studio login: ${OWNER_EMAIL} / ${OWNER_PASSWORD}  (DEV ONLY)`);
+  } else {
+    console.log(`Studio owner: ${OWNER_EMAIL} (password from environment, not logged)`);
+  }
 });
