@@ -134,15 +134,7 @@ itissendittodb.com, www.itissendittodb.com {
 }
 
 senditto.dev, www.senditto.dev {
-	# Platform authenticates against the same control database as the studio.
-	handle /api/* {
-		reverse_proxy 127.0.0.1:5181 {
-			flush_interval -1
-		}
-	}
-	handle {
-		reverse_proxy 127.0.0.1:3000
-	}
+	reverse_proxy 127.0.0.1:3000
 }
 CADDY
 systemctl enable caddy

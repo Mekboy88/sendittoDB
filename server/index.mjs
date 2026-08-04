@@ -744,32 +744,6 @@ async function handle(req, res) {
     return;
   }
 
-  /* Platform (senditto.dev) hydrate: the signed-in account's own data.
-     Staff roles see everything; product users only their own workspaces. */
-  if (path === "/api/platform/state") {
-    const staff = ["owner", "admin", "operator"].includes(me.role);
-    const mine = db.workspaces.filter(
-      (w) => staff || w.owner_user_id === me.id || w.owner_email === me.email
-    );
-    const wsIds = new Set(mine.map((w) => w.id));
-    const scoped = (rows) => rows.filter((r) => staff || wsIds.has(r.workspace_id));
-    send(res, 200, {
-      at: nowIso(),
-      user: { ...publicUser(me), displayName: me.display_name },
-      workspaces: mine,
-      domains: scoped(db.domains),
-      keys: scoped(db.api_keys),
-      messages: scoped(db.messages).slice(0, 500),
-      suppressions: scoped(db.suppressions),
-      contacts: scoped(db.contacts),
-      templates: scoped(db.templates),
-      campaigns: scoped(db.campaigns),
-      webhooks: scoped(db.webhooks),
-      logs: (staff ? db.audit : []).slice(0, 200),
-    });
-    return;
-  }
-
   if (path === "/api/db/realtime") {
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
