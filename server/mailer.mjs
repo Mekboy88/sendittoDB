@@ -76,13 +76,33 @@ const cfg = () => ({
       },
 });
 
+/**
+ * Is the configured key actually usable? A present-but-unparseable key is
+ * worse than none: mail goes out unsigned while the studio reports it signed.
+ * (systemd's EnvironmentFile strips backslashes, which silently corrupts a
+ * PEM passed through the environment — hence checking, not just presence.)
+ */
+export function dkimUsable() {
+  const c = cfg();
+  if (!c.dkim.domain || !c.dkim.key) return false;
+  try {
+    createPublicKey(c.dkim.key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** What the operator needs to publish, and what we are signing with. */
 export function dkimInfo() {
   const c = cfg();
+  const usable = dkimUsable();
   return {
     domain: c.dkim.domain,
     selector: c.dkim.selector,
-    active: Boolean(c.dkim.domain && c.dkim.key),
+    active: usable,
+    keyPresent: Boolean(c.dkim.key),
+    problem: c.dkim.key && !usable ? "The stored signing key is not readable — rotate it." : null,
     host: c.dkim.domain ? `${c.dkim.selector}._domainkey.${c.dkim.domain}` : null,
   };
 }
@@ -112,7 +132,7 @@ export function mailerStatus() {
     auth: c.user ? "configured" : "none",
     from: c.from || "",
     tls: c.secure ? "implicit" : "starttls",
-    dkim: c.dkim.key && c.dkim.domain ? `${c.dkim.selector}._domainkey.${c.dkim.domain}` : "not signed",
+    dkim: dkimUsable() ? `${c.dkim.selector}._domainkey.${c.dkim.domain}` : "not signed",
   };
 }
 
