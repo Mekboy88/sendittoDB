@@ -42,6 +42,28 @@ export async function api(path, { method = "GET", body, token } = {}) {
   return data;
 }
 
+/**
+ * Change signal. The realtime stream reports every write the database makes;
+ * data hooks listen here so open pages refresh themselves instead of waiting
+ * for the next poll.
+ */
+const dataListeners = new Set();
+
+export function onDataChange(handler) {
+  dataListeners.add(handler);
+  return () => dataListeners.delete(handler);
+}
+
+export function emitDataChange(collection) {
+  for (const handler of dataListeners) {
+    try {
+      handler(collection);
+    } catch {
+      /* a listener must not break the stream */
+    }
+  }
+}
+
 export function openRealtime(token, onEvent) {
   const base = getApiBase();
   if (!base || !token) return () => {};

@@ -40,7 +40,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { api, fmtClock, fmtDate, fmtIso, fmtNum, fmtTime, redact } from "./api.js";
+import { api, fmtClock, fmtDate, fmtIso, fmtNum, fmtTime, onDataChange, redact } from "./api.js";
 import {
   CREATE_SAFE_ROLES,
   DEFAULT_ROLE_MATRIX,
@@ -113,6 +113,23 @@ export function useEntity(token, path) {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Refresh when the database reports a change to this collection (or to a
+  // table this page is reading), so every page stays live without polling.
+  useEffect(() => {
+    let timer = null;
+    return onDataChange((collection) => {
+      const watching =
+        !collection ||
+        path.endsWith(`/${collection}`) ||
+        path.startsWith("/api/db/tables/") ||
+        path.startsWith("/api/audit");
+      if (!watching) return;
+      clearTimeout(timer);
+      timer = setTimeout(load, 200);
+    });
+  }, [path, load]);
+
   return { rows, total, err, loading, load };
 }
 

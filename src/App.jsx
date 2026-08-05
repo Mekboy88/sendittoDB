@@ -24,7 +24,7 @@ import {
   Settings,
   Webhook,
 } from "lucide-react";
-import { api, loadSession, openRealtime, redact, saveSession } from "./api.js";
+import { api, emitDataChange, loadSession, openRealtime, redact, saveSession } from "./api.js";
 import { roleLabel } from "./roles.js";
 import { AppDialogsProvider, Banner, Pill } from "./ui.jsx";
 import {
@@ -264,6 +264,8 @@ export default function App() {
       setRtState(ev.type === "error" ? "error" : "live");
       setLiveAt(ev.at || new Date().toISOString());
       if (ev.type === "overview" && ev.data) setOverview(ev.data);
+      // Any write anywhere refreshes the pages reading that data.
+      if (ev.type === "change") emitDataChange(ev.collection);
       setEvents((prev) => [{ ...ev, at: ev.at || new Date().toISOString() }, ...prev].slice(0, 100));
     });
     const poll = setInterval(refresh, pollMs);
