@@ -31,6 +31,7 @@ import {
 import { mailerReady, mailerStatus } from "./mailer.mjs";
 import { verifyDomain } from "./dnscheck.mjs";
 import { STREAMS, createSender, hint, publicMessage } from "./sending.mjs";
+import { aiStatus, assistantAsk, brainAsk, fraudScore } from "./ai.mjs";
 
 const PORT = Number(process.env.PORT || 5181);
 const DATA_DIR = join(dirname(fileURLToPath(import.meta.url)), "data");
@@ -709,6 +710,116 @@ const COLLECTIONS = {
 /** Roles that operate Senditto itself, as opposed to product customers. */
 const STAFF_ROLES = ["owner", "admin", "operator", "support"];
 
+/**
+ * What the AI Brain is allowed to reason about: platform-wide figures, no
+ * message bodies and no recipient addresses.
+ */
+function platformSnapshot() {
+  const byStatus = (rows, field = "status") =>
+    rows.reduce((acc, r) => {
+      const k = String(r[field] || "unknown").toLowerCase();
+      acc[k] = (acc[k] || 0) + 1;
+      return acc;
+    }, {});
+  const dayAgo = Date.now() - 86400000;
+  const weekAgo = Date.now() - 7 * 86400000;
+  return {
+    at: nowIso(),
+    accounts: {
+      total: db.users.length,
+      byRole: byStatus(db.users, "role"),
+      newThisWeek: db.users.filter((u) => new Date(u.created_at).getTime() > weekAgo).length,
+    },
+    workspaces: { total: db.workspaces.length, byStatus: byStatus(db.workspaces) },
+    domains: {
+      total: db.domains.length,
+      verified: db.domains.filter((d) => d.status === "verified").length,
+      spfOk: db.domains.filter((d) => d.spf).length,
+      dkimOk: db.domains.filter((d) => d.dkim).length,
+      dmarcOk: db.domains.filter((d) => d.dmarc).length,
+    },
+    sending: {
+      total: db.messages.length,
+      last24h: db.messages.filter((m) => new Date(m.created_at).getTime() > dayAgo).length,
+      byStatus: byStatus(db.messages),
+      byStream: byStatus(db.messages, "stream"),
+      deliveredRate: rate(db.messages, (m) => m.status === "delivered"),
+      bounceRate: rate(db.messages, (m) => m.status === "bounced"),
+    },
+    audience: { contacts: db.contacts.length, byStatus: byStatus(db.contacts) },
+    campaigns: { total: db.campaigns.length, byStatus: byStatus(db.campaigns) },
+    suppressions: { total: db.suppressions.length, byReason: byStatus(db.suppressions, "reason") },
+    delivery: { mailerConfigured: mailerReady(), encryptionAtRest: encryptionReady() },
+  };
+}
+
+const rate = (rows, test) =>
+  rows.length ? Math.round((rows.filter(test).length / rows.length) * 1000) / 10 : 0;
+
+/**
+ * Assess a new account for abuse. A high-risk verdict flags the account for a
+ * human to look at — it never disables anyone automatically, because a wrong
+ * automatic block costs a real customer their business.
+ */
+async function screenSignup(user, workspace) {
+  if (!aiStatus().configured) return;
+  const verdict = await fraudScore({
+    kind: "signup",
+    email: user.email,
+    displayName: user.display_name,
+    company: user.company,
+    workspaceName: workspace?.name,
+    createdAt: user.created_at,
+    accountsFromSameDomain: db.users.filter(
+      (u) => u.email.split("@")[1] === user.email.split("@")[1]
+    ).length,
+  });
+  user.risk = { ...verdict, checkedAt: nowIso() };
+  const level = verdict.recommendation === "allow" ? "info" : "warn";
+  logAudit(level, "fraud.signup", `${user.email} screened: ${verdict.risk} risk (${verdict.recommendation}) — ${verdict.reason}`, "security");
+  broadcast({ type: "change", collection: "users", event: "updated", id: user.id, row: publicUser(user) });
+  saveDb();
+}
+
+/**
+ * What the customer assistant may see: this account's own workspace only,
+ * summarised — never another customer's rows, never message bodies.
+ */
+function workspaceSummary(me, workspaceId) {
+  const mine = db.workspaces.filter(
+    (w) => w.owner_user_id === me.id || w.owner_email === me.email
+  );
+  const ws = workspaceId ? mine.find((w) => w.id === workspaceId) : mine[0];
+  if (!ws) return { workspace: null, note: "This account has no workspace yet." };
+  const scoped = (rows) => rows.filter((r) => r.workspace_id === ws.id);
+  const contacts = scoped(db.contacts);
+  const messages = scoped(db.messages);
+  return {
+    workspace: { name: ws.name, type: ws.type, created: ws.created_at },
+    domains: scoped(db.domains).map((d) => ({
+      domain: d.domain,
+      status: d.status,
+      spf: d.spf,
+      dkim: d.dkim,
+      dmarc: d.dmarc,
+    })),
+    contacts: {
+      total: contacts.length,
+      subscribed: contacts.filter((c) => /^subscribed$/i.test(String(c.status || "").trim())).length,
+      unsubscribed: contacts.filter((c) => /^unsubscribed$/i.test(String(c.status || "").trim())).length,
+    },
+    templates: scoped(db.templates).map((t) => ({ name: t.name, subject: decrypt(t.subject) })),
+    campaigns: scoped(db.campaigns).map((c) => ({ name: c.name, status: c.status, sent: c.sent })),
+    sending: {
+      total: messages.length,
+      byStatus: messages.reduce((a, m) => ({ ...a, [m.status]: (a[m.status] || 0) + 1 }), {}),
+      deliveredRate: rate(messages, (m) => m.status === "delivered"),
+      bounceRate: rate(messages, (m) => m.status === "bounced"),
+    },
+    suppressions: scoped(db.suppressions).length,
+  };
+}
+
 /** May this account act inside this workspace? Staff may act anywhere. */
 function canUseWorkspace(me, workspaceId) {
   if (STAFF_ROLES.includes(me.role)) return true;
@@ -806,6 +917,9 @@ async function handle(req, res) {
       expires_at: new Date(Date.now() + 12 * 3600 * 1000).toISOString(),
     });
     logAudit("success", "auth.register", `${user.email} created an account`, "security");
+    // Screen the new account in the background: never make signup wait on it,
+    // and never block an account on an assessment that failed to run.
+    screenSignup(user, ws).catch(() => {});
     broadcast({ type: "change", collection: "users", event: "created", id: user.id, row: publicUser(user) });
     broadcast({ type: "change", collection: "workspaces", event: "created", id: ws.id, row: ws });
     saveDb();
@@ -867,6 +981,73 @@ async function handle(req, res) {
 
   if (path === "/api/stats") {
     send(res, 200, statsPayload());
+    return;
+  }
+
+  /* ---------------- AI ---------------- */
+
+  if (path === "/api/ai/status") {
+    send(res, 200, { ...aiStatus(), brainAccess: ["owner", "admin"].includes(me.role) });
+    return;
+  }
+
+  /** The Brain is for the people who run Senditto, and nobody else. */
+  if (path === "/api/ai/brain" && method === "POST") {
+    if (!["owner", "admin"].includes(me.role)) {
+      send(res, 403, { error: "The AI Brain is available to the owner and admins only" });
+      return;
+    }
+    const body = await readBody(req);
+    const question = String(body.question || "").trim();
+    if (!question) {
+      send(res, 422, { error: "Ask a question first" });
+      return;
+    }
+    try {
+      const result = await brainAsk({ question, snapshot: platformSnapshot() });
+      logAudit("info", "ai.brain", `${me.email} asked the AI Brain a question`, "ai");
+      saveDb();
+      send(res, 200, result);
+    } catch (err) {
+      send(res, err.code || 502, { error: err.message });
+    }
+    return;
+  }
+
+  /** The customer assistant sees only the caller's own workspace. */
+  if (path === "/api/ai/assistant" && method === "POST") {
+    const body = await readBody(req);
+    const question = String(body.question || "").trim();
+    if (!question) {
+      send(res, 422, { error: "Ask a question first" });
+      return;
+    }
+    const workspaceId = body.workspaceId || body.workspace_id || null;
+    if (workspaceId && !canUseWorkspace(me, workspaceId)) {
+      send(res, 403, { error: "That workspace is not yours" });
+      return;
+    }
+    try {
+      const result = await assistantAsk({ question, workspace: workspaceSummary(me, workspaceId) });
+      send(res, 200, result);
+    } catch (err) {
+      send(res, err.code || 502, { error: err.message });
+    }
+    return;
+  }
+
+  /** Re-run the abuse check on an account or a message, on demand. */
+  if (path === "/api/ai/fraud-check" && method === "POST") {
+    if (!STAFF_ROLES.includes(me.role)) {
+      send(res, 403, { error: "Fraud review is for staff only" });
+      return;
+    }
+    const body = await readBody(req);
+    try {
+      send(res, 200, await fraudScore(body.subject || body));
+    } catch (err) {
+      send(res, err.code || 502, { error: err.message });
+    }
     return;
   }
 

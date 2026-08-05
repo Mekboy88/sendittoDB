@@ -5403,3 +5403,40 @@ tr.bulk-selected .bulk-col {
     justify-content: flex-start;
   }
 }
+
+/* —— AI Brain —— */
+.ai-page { display: flex; flex-direction: column; min-height: 0; }
+.ai-thread {
+  flex: 1 1 auto;
+  min-height: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  margin: 14px 0;
+  overflow-y: auto;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.ai-empty { display: grid; gap: 12px; place-items: center; padding: 28px 12px; color: var(--muted); text-align: center; }
+.ai-suggestions { display: grid; gap: 8px; width: min(560px, 100%); }
+.ai-suggestions .btn { text-align: left; white-space: normal; line-height: 1.4; }
+.ai-msg { padding: 12px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); }
+.ai-msg-head { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.ai-msg-body { white-space: pre-wrap; line-height: 1.55; font-size: 14px; }
+.ai-msg-foot { margin-top: 8px; font-size: 11px; color: var(--muted); }
+.ai-you { background: color-mix(in srgb, var(--accent) 8%, var(--bg)); }
+.ai-error { border-color: #f0a0a0; }
+.ai-pending { color: var(--muted); font-style: italic; }
+.ai-composer { display: flex; gap: 8px; }
+.ai-composer input { flex: 1 1 auto; padding: 11px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--card); color: var(--ink); font-size: 14px; }
+
+/* —— Abuse review —— */
+.fraud-panel { display: grid; gap: 10px; }
+.fraud-verdict { padding: 12px 14px; border-radius: 10px; border: 1px solid var(--line); font-size: 13px; }
+.fraud-verdict p { margin: 6px 0 0; }
+.fraud-verdict ul { margin: 8px 0 0; padding-left: 18px; }
+.fraud-low { border-color: #7bc99a; }
+.fraud-medium { border-color: #e8b84a; }
+.fraud-high { border-color: #f08080; }

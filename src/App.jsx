@@ -23,6 +23,7 @@ import {
   ScrollText,
   Settings,
   Webhook,
+  Brain,
 } from "lucide-react";
 import { api, emitDataChange, loadSession, openRealtime, redact, saveSession } from "./api.js";
 import { roleLabel } from "./roles.js";
@@ -43,6 +44,7 @@ import {
   UsersPage,
   WorkspacesPage,
 } from "./pages.jsx";
+import { AIBrainPage } from "./pages-ai.jsx";
 import {
   CampaignsPage,
   ContactsPage,
@@ -102,6 +104,7 @@ const NAV = [
   { id: "suppressions", label: "Suppressions", icon: Ban, group: "Compliance" },
   { id: "audit", label: "Audit log", icon: ScrollText, group: "Compliance" },
   { id: "rights", label: "Rights requests", icon: Shield, group: "Compliance" },
+  { id: "brain", label: "AI Brain", icon: Brain, group: "Ops" },
   { id: "server", label: "Server health", icon: Server, group: "Ops" },
   { id: "sessions", label: "Sessions", icon: Activity, group: "Ops" },
   { id: "settings", label: "Settings", icon: Settings, group: "Ops" },
@@ -368,6 +371,7 @@ export default function App() {
               onNavigate={setPage}
             />
           ) : null}
+          {page === "brain" ? <AIBrainPage token={token} session={session} /> : null}
           {page === "tables" ? <TablesPage token={token} overview={overview} /> : null}
           {page === "workspaces" ? <WorkspacesPage token={token} onChanged={refresh} /> : null}
           {page === "users" ? (
