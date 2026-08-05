@@ -4,6 +4,9 @@
 /* —— Light (default): airy white studio —— */
 :root,
 [data-theme="light"] {
+  /* Width of the page column to the right of the sidebar. Pages sit centred
+     inside it instead of stretching across the whole screen. */
+  --page-max: 1280px;
   --bg: #f6f7f9;
   --content-bg: #f6f7f9;
   --side-bg: #ffffff;
@@ -335,6 +338,13 @@ select.native-forbidden {
   overflow: auto;
   padding: 18px 20px 40px;
   background: transparent;
+}
+
+/* Centre every page in a readable column. The bar and the scrollbar still
+   span the full width; only their contents line up on the same column. */
+.content,
+.topbar {
+  padding-inline: max(20px, calc((100% - var(--page-max)) / 2));
 }
 
 /* —— Copy buttons: green check confirms successful copy —— */
