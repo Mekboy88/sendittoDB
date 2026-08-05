@@ -662,6 +662,11 @@ const COLLECTIONS = {
   "internal-messages": ["internal_messages", "im"],
 };
 
+/** Roles that operate Senditto itself, as opposed to product customers. */
+const STAFF_ROLES = ["owner", "admin", "operator", "support"];
+/** Collections a product customer must never reach. */
+const STAFF_ONLY_COLLECTIONS = new Set(["users", "rights", "internal-messages"]);
+
 /* ============================ request handler ============================ */
 
 async function handle(req, res) {
@@ -684,6 +689,74 @@ async function handle(req, res) {
   /* ---------- public ---------- */
   if (path === "/api/health") {
     send(res, 200, { ok: true, latencyMs: 1 + Math.floor(Math.random() * 4), at: nowIso() });
+    return;
+  }
+
+  /* Public sign-up for the product. Creates a real customer account plus the
+     workspace it starts with. Staff roles can never be self-assigned here. */
+  if (path === "/api/auth/register" && method === "POST") {
+    const body = await readBody(req);
+    const email = String(body.email || "").toLowerCase().trim();
+    const password = String(body.password || "");
+    const name = String(body.name || "").trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      send(res, 422, { error: "Enter a valid email address." });
+      return;
+    }
+    if (password.length < 8) {
+      send(res, 422, { error: "Password must be at least 8 characters." });
+      return;
+    }
+    if (db.users.some((u) => u.email.toLowerCase() === email)) {
+      send(res, 409, { error: "An account with this email already exists." });
+      return;
+    }
+    const user = {
+      id: uid("usr"),
+      email,
+      display_name: name || email.split("@")[0],
+      role: "developer",
+      status: "active",
+      phone: "",
+      company: String(body.company || "").trim(),
+      country: "",
+      two_factor_enabled: false,
+      password,
+      created_at: nowIso(),
+      last_seen: nowIso(),
+    };
+    db.users.push(user);
+    const ws = {
+      id: uid("ws"),
+      name: user.company || `${user.display_name}'s workspace`,
+      type: String(body.workspaceType || "Developer"),
+      region: "eu-west",
+      timezone: "Europe/Berlin",
+      status: "Active",
+      owner_user_id: user.id,
+      owner_email: user.email,
+      owner_display_name: user.display_name,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    db.workspaces.push(ws);
+    const token = randomBytes(24).toString("hex");
+    db.sessions.push({
+      id: uid("ses"),
+      token,
+      user_id: user.id,
+      email: user.email,
+      role: user.role,
+      purpose: String(body.purpose || "platform"),
+      created_at: nowIso(),
+      last_seen_at: nowIso(),
+      expires_at: new Date(Date.now() + 12 * 3600 * 1000).toISOString(),
+    });
+    logAudit("success", "auth.register", `${user.email} created an account`, "security");
+    broadcast({ type: "change", collection: "users", event: "created", id: user.id, row: publicUser(user) });
+    broadcast({ type: "change", collection: "workspaces", event: "created", id: ws.id, row: ws });
+    saveDb();
+    send(res, 201, { token, expiresAt: db.sessions[db.sessions.length - 1].expires_at, user: publicUser(user) });
     return;
   }
 
@@ -741,6 +814,33 @@ async function handle(req, res) {
 
   if (path === "/api/stats") {
     send(res, 200, statsPayload());
+    return;
+  }
+
+  /* Everything the signed-in account may see in the product UI.
+     Staff roles get the full picture; a customer only ever gets their own. */
+  if (path === "/api/platform/state") {
+    const staff = ["owner", "admin", "operator", "support"].includes(me.role);
+    const mine = db.workspaces.filter(
+      (w) => staff || w.owner_user_id === me.id || w.owner_email === me.email
+    );
+    const wsIds = new Set(mine.map((w) => w.id));
+    const scoped = (rows) => rows.filter((r) => staff || wsIds.has(r.workspace_id));
+    send(res, 200, {
+      at: nowIso(),
+      user: { ...publicUser(me), displayName: me.display_name },
+      workspaces: mine,
+      domains: scoped(db.domains),
+      keys: scoped(db.api_keys),
+      messages: scoped(db.messages),
+      suppressions: scoped(db.suppressions),
+      contacts: scoped(db.contacts),
+      templates: scoped(db.templates),
+      campaigns: scoped(db.campaigns),
+      webhooks: scoped(db.webhooks),
+      logs: staff ? db.audit.slice(0, 300) : [],
+      stats: statsPayload(),
+    });
     return;
   }
 
@@ -946,16 +1046,53 @@ async function handle(req, res) {
   const m = path.match(/^\/api\/([a-z-]+)(?:\/([^/]+))?$/);
   if (m && COLLECTIONS[m[1]]) {
     const [dbKey, prefix] = COLLECTIONS[m[1]];
+    const kind = m[1];
     const rows = db[dbKey];
     const id = m[2];
 
-    if (method === "GET" && !id) {
-      send(res, 200, { rows, total: rows.length });
+    /* Authorization. Product accounts are confined to workspaces they own;
+       operator-only collections and role changes stay with staff. */
+    const staff = STAFF_ROLES.includes(me.role);
+    if (!staff && STAFF_ONLY_COLLECTIONS.has(kind)) {
+      send(res, 403, { error: "You do not have access to this data" });
       return;
+    }
+    if (STAFF_ONLY_COLLECTIONS.has(kind) && !["owner", "admin"].includes(me.role) && method !== "GET") {
+      send(res, 403, { error: "Only an owner or admin can change this data" });
+      return;
+    }
+    const ownWorkspaceIds = new Set(
+      db.workspaces.filter((w) => w.owner_user_id === me.id || w.owner_email === me.email).map((w) => w.id)
+    );
+    const mayTouch = (row) => {
+      if (staff) return true;
+      if (kind === "workspaces") return row.owner_user_id === me.id || row.owner_email === me.email;
+      return !row.workspace_id || ownWorkspaceIds.has(row.workspace_id);
+    };
+
+    if (method === "GET" && !id) {
+      const visible = staff ? rows : rows.filter(mayTouch);
+      send(res, 200, { rows: visible, total: visible.length });
+      return;
+    }
+
+    if (!staff && (method === "PATCH" || method === "PUT" || method === "DELETE") && id) {
+      const target = rows.find((r) => String(r.id) === String(id));
+      if (target && !mayTouch(target)) {
+        send(res, 403, { error: "This item belongs to another workspace" });
+        return;
+      }
     }
 
     if (method === "POST" && !id) {
       const body = await readBody(req);
+      if (!staff && kind !== "workspaces") {
+        const wsId = body.workspaceId || body.workspace_id;
+        if (wsId && !ownWorkspaceIds.has(wsId)) {
+          send(res, 403, { error: "This item belongs to another workspace" });
+          return;
+        }
+      }
       const row = createRow(m[1], prefix, body, me);
       if (row.__error) {
         send(res, row.__code || 422, { error: row.__error });
@@ -966,6 +1103,7 @@ async function handle(req, res) {
         workspace_id: row.row.workspace_id,
       });
       if (m[1] === "suppressions") broadcast({ type: "suppression", event: "created", email: row.row.email, reason: row.row.reason, id: row.row.id });
+      broadcast({ type: "change", collection: m[1], event: "created", id: row.row.id, row: row.row });
       saveDb();
       send(res, 201, row.extra ? { ...row.row, ...row.extra } : { row: row.row, ...(row.topLevel || {}) });
       return;
@@ -981,6 +1119,7 @@ async function handle(req, res) {
       patchRow(m[1], row, body);
       row.updated_at = nowIso();
       logAudit("info", `${m[1]}.update`, `${me.email} updated ${m[1].slice(0, -1)} ${row.name || row.email || row.subject || row.id}`, m[1], { workspace_id: row.workspace_id });
+      broadcast({ type: "change", collection: m[1], event: "updated", id: row.id, row });
       saveDb();
       send(res, 200, { row });
       return;
@@ -995,6 +1134,7 @@ async function handle(req, res) {
       db[dbKey] = rows.filter((r) => r !== row);
       logAudit("warn", `${m[1]}.delete`, `${me.email} deleted ${m[1].slice(0, -1)} ${row.name || row.email || row.subject || row.id}`, m[1], { workspace_id: row.workspace_id });
       if (m[1] === "suppressions") broadcast({ type: "suppression", event: "deleted", email: row.email, id: row.id });
+      broadcast({ type: "change", collection: m[1], event: "deleted", id: row.id, row });
       saveDb();
       send(res, 200, { ok: true });
       return;
@@ -1008,13 +1148,19 @@ async function handle(req, res) {
 
 function createRow(kind, prefix, body, me) {
   const base = { id: uid(prefix), created_at: nowIso(), updated_at: nowIso() };
-  const ws = body.workspaceId ? { workspace_id: body.workspaceId, workspace_name: wsName(body.workspaceId) } : { workspace_id: null, workspace_name: null };
+  // Clients send either camelCase or snake_case; accept both so a row never
+  // loses its workspace and disappears from the owner's scoped view.
+  const wsId = body.workspaceId || body.workspace_id || null;
+  const ws = wsId ? { workspace_id: wsId, workspace_name: wsName(wsId) } : { workspace_id: null, workspace_name: null };
 
   switch (kind) {
     case "users": {
       if (!body.email) return { __error: "Email is required" };
       if (db.users.some((u) => u.email.toLowerCase() === String(body.email).toLowerCase()))
         return { __error: "A user with this email already exists" };
+      // Only the owner may mint elevated accounts.
+      if (["owner", "admin"].includes(body.role) && me.role !== "owner")
+        return { __error: "Only the owner can create owner or admin accounts", __code: 403 };
       const temporaryPassword = body.password || `tmp-${randomBytes(4).toString("hex")}`;
       return {
         row: {
@@ -1035,7 +1181,9 @@ function createRow(kind, prefix, body, me) {
       };
     }
     case "workspaces": {
-      const owner = db.users.find((u) => u.id === body.ownerUserId) || null;
+      // Default to the signed-in account, so a workspace is never ownerless.
+      const owner =
+        db.users.find((u) => u.id === (body.ownerUserId || body.owner_user_id)) || me || null;
       return {
         row: {
           ...base,
