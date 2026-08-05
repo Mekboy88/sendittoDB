@@ -58,6 +58,7 @@ import {
 
 const THEME_KEY = "senditto_db_studio_theme";
 const POLL_KEY = "senditto_db_studio_poll";
+const PAGE_KEY = "senditto_db_studio_page";
 
 /** Resolve Auto → light|dark from OS, else by local clock (day 7–19 light). */
 export function resolveTheme(pref) {
@@ -182,7 +183,15 @@ function Login({ onLogin }) {
 
 export default function App() {
   const [session, setSession] = useState(() => loadSession());
-  const [page, setPage] = useState("overview");
+  // Come back to the page you were on, not to Overview, after a refresh.
+  const [page, setPage] = useState(() => {
+    try {
+      const saved = localStorage.getItem(PAGE_KEY);
+      return NAV.some((n) => n.id === saved) ? saved : "overview";
+    } catch {
+      return "overview";
+    }
+  });
   const [overview, setOverview] = useState(null);
   const [error, setError] = useState("");
   const [liveAt, setLiveAt] = useState(null);
@@ -210,6 +219,14 @@ export default function App() {
   }, []);
 
   const token = session?.token;
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PAGE_KEY, page);
+    } catch {
+      /* private mode */
+    }
+  }, [page]);
 
   // Apply resolved light/dark; re-check system + clock while on Auto
   useEffect(() => {
