@@ -24,6 +24,7 @@ import {
   Settings,
   Webhook,
   Brain,
+  Send,
 } from "lucide-react";
 import { api, emitDataChange, loadSession, openRealtime, redact, saveSession } from "./api.js";
 import { roleLabel } from "./roles.js";
@@ -45,6 +46,7 @@ import {
   WorkspacesPage,
 } from "./pages.jsx";
 import { AIBrainPage } from "./pages-ai.jsx";
+import { SendingSetupPage } from "./pages-sending.jsx";
 import {
   CampaignsPage,
   ContactsPage,
@@ -104,6 +106,7 @@ const NAV = [
   { id: "suppressions", label: "Suppressions", icon: Ban, group: "Compliance" },
   { id: "audit", label: "Audit log", icon: ScrollText, group: "Compliance" },
   { id: "rights", label: "Rights requests", icon: Shield, group: "Compliance" },
+  { id: "sending", label: "Sending setup", icon: Send, group: "Ops" },
   { id: "brain", label: "AI Brain", icon: Brain, group: "Ops" },
   { id: "server", label: "Server health", icon: Server, group: "Ops" },
   { id: "sessions", label: "Sessions", icon: Activity, group: "Ops" },
@@ -372,6 +375,7 @@ export default function App() {
             />
           ) : null}
           {page === "brain" ? <AIBrainPage token={token} session={session} /> : null}
+          {page === "sending" ? <SendingSetupPage token={token} session={session} /> : null}
           {page === "tables" ? <TablesPage token={token} overview={overview} /> : null}
           {page === "workspaces" ? <WorkspacesPage token={token} onChanged={refresh} /> : null}
           {page === "users" ? (

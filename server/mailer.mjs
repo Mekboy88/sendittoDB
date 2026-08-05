@@ -22,7 +22,36 @@
  */
 import net from "node:net";
 import tls from "node:tls";
-import { createSign, randomBytes, createHash } from "node:crypto";
+import { createSign, createPublicKey, randomBytes, createHash, generateKeyPairSync } from "node:crypto";
+
+/**
+ * DKIM keys live in the database so an operator can rotate them from the
+ * studio without a restart. The environment is only the bootstrap: whatever
+ * is configured here wins once loaded.
+ */
+let dkimOverride = null;
+
+export function configureDkim(key) {
+  dkimOverride = key && key.privateKey ? { ...key } : null;
+}
+
+/** Make a fresh signing keypair. The private half never leaves the server. */
+export function generateDkimKeypair() {
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  });
+  return { publicKey, privateKey, publicKeyBase64: pemBody(publicKey) };
+}
+
+/** The base64 body of a PEM, which is what a DNS record carries. */
+export function pemBody(pem) {
+  return String(pem)
+    .split("\n")
+    .filter((l) => l && !l.startsWith("-----"))
+    .join("");
+}
 
 const cfg = () => ({
   host: process.env.SMTP_HOST || "",
@@ -34,12 +63,41 @@ const cfg = () => ({
   // on 465; SMTP_SECURE forces it on any port.
   secure: process.env.SMTP_SECURE === "1" || Number(process.env.SMTP_PORT || 587) === 465,
   allowSelfSigned: process.env.SMTP_ALLOW_SELF_SIGNED === "1",
-  dkim: {
-    domain: process.env.DKIM_DOMAIN || "",
-    selector: process.env.DKIM_SELECTOR || "senditto",
-    key: (process.env.DKIM_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
-  },
+  dkim: dkimOverride
+    ? {
+        domain: dkimOverride.domain || process.env.DKIM_DOMAIN || "",
+        selector: dkimOverride.selector || "senditto",
+        key: dkimOverride.privateKey,
+      }
+    : {
+        domain: process.env.DKIM_DOMAIN || "",
+        selector: process.env.DKIM_SELECTOR || "senditto",
+        key: (process.env.DKIM_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
+      },
 });
+
+/** What the operator needs to publish, and what we are signing with. */
+export function dkimInfo() {
+  const c = cfg();
+  return {
+    domain: c.dkim.domain,
+    selector: c.dkim.selector,
+    active: Boolean(c.dkim.domain && c.dkim.key),
+    host: c.dkim.domain ? `${c.dkim.selector}._domainkey.${c.dkim.domain}` : null,
+  };
+}
+
+/** Derive the public half from the stored private key. */
+export function dkimPublicRecord() {
+  const c = cfg();
+  if (!c.dkim.key) return null;
+  try {
+    const pub = createPublicKey(c.dkim.key).export({ type: "spki", format: "pem" });
+    return `v=DKIM1; k=rsa; p=${pemBody(pub)}`;
+  } catch {
+    return null;
+  }
+}
 
 export function mailerReady() {
   const c = cfg();

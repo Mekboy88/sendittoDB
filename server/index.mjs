@@ -28,7 +28,14 @@ import {
   verifyPassword,
   verifySecret,
 } from "./crypto.mjs";
-import { mailerReady, mailerStatus } from "./mailer.mjs";
+import {
+  configureDkim,
+  dkimInfo,
+  dkimPublicRecord,
+  generateDkimKeypair,
+  mailerReady,
+  mailerStatus,
+} from "./mailer.mjs";
 import { verifyDomain } from "./dnscheck.mjs";
 import { STREAMS, createSender, hint, publicMessage } from "./sending.mjs";
 import { aiStatus, assistantAsk, brainAsk, fraudScore } from "./ai.mjs";
@@ -1051,6 +1058,123 @@ async function handle(req, res) {
     return;
   }
 
+  /* ---------------- sending setup (DNS + keys) ---------------- */
+
+  /**
+   * Everything an operator needs to get a domain sending: the exact records to
+   * publish and whether each one is live in public DNS right now.
+   */
+  if (path === "/api/sending/setup") {
+    if (!STAFF_ROLES.includes(me.role)) {
+      send(res, 403, { error: "Sending setup is for staff only" });
+      return;
+    }
+    const info = dkimInfo();
+    const domain = url.searchParams.get("domain") || info.domain || db.domains[0]?.domain || "";
+    const spfInclude = db.meta.spfInclude || process.env.SPF_INCLUDE || "";
+    const live = domain ? await verifyDomain(domain, { selector: info.selector, spfInclude }) : null;
+    send(res, 200, {
+      domain,
+      dkim: {
+        ...info,
+        record: dkimPublicRecord(),
+        rotatedAt: db.meta.dkimRotatedAt || null,
+      },
+      spfInclude,
+      records: domain
+        ? [
+            {
+              id: "dkim",
+              type: "TXT",
+              name: `${info.selector}._domainkey`,
+              value: dkimPublicRecord() || "",
+              purpose: "Proves the mail really came from you. Required.",
+              published: live?.dkim?.ok || false,
+              detail: live?.dkim?.reason,
+            },
+            {
+              id: "spf",
+              type: "TXT",
+              name: "@",
+              value: `v=spf1 ${spfInclude ? `include:${spfInclude} ` : ""}~all`,
+              purpose: "Authorises your sending host. Required.",
+              published: live?.spf?.ok || false,
+              detail: live?.spf?.reason,
+              needsInput: !spfInclude,
+            },
+            {
+              id: "dmarc",
+              type: "TXT",
+              name: "_dmarc",
+              value: `v=DMARC1; p=none; rua=mailto:dmarc@${domain}`,
+              purpose: "Tells inboxes what to do with mail that fails. Start at p=none, then tighten.",
+              published: live?.dmarc?.ok || false,
+              detail: live?.dmarc?.reason,
+            },
+          ]
+        : [],
+      verified: live?.ok || false,
+      checkedAt: live?.checkedAt || null,
+      mailer: mailerStatus(),
+    });
+    return;
+  }
+
+  /** Record which provider's SPF to include, so the record is complete. */
+  if (path === "/api/sending/spf" && method === "POST") {
+    if (!["owner", "admin"].includes(me.role)) {
+      send(res, 403, { error: "Only an owner or admin can change sending setup" });
+      return;
+    }
+    const body = await readBody(req);
+    db.meta.spfInclude = String(body.include || "").trim().replace(/^include:/, "");
+    logAudit("info", "sending.spf", `${me.email} set the SPF include to ${db.meta.spfInclude || "(none)"}`, "domains");
+    saveDb();
+    send(res, 200, { spfInclude: db.meta.spfInclude });
+    return;
+  }
+
+  /**
+   * Rotate the DKIM signing key. The new private key is stored encrypted and
+   * used immediately; the operator publishes the new public record.
+   * The old key keeps working for receivers until DNS catches up, so rotate
+   * and then republish — never the other way round.
+   */
+  if (path === "/api/sending/dkim/rotate" && method === "POST") {
+    if (!["owner", "admin"].includes(me.role)) {
+      send(res, 403, { error: "Only an owner or admin can rotate the signing key" });
+      return;
+    }
+    const body = await readBody(req);
+    const info = dkimInfo();
+    const domain = String(body.domain || info.domain || db.domains[0]?.domain || "").trim();
+    if (!domain) {
+      send(res, 422, { error: "Add a sending domain first" });
+      return;
+    }
+    const selector = String(body.selector || `senditto${new Date().getFullYear()}`).trim();
+    const pair = generateDkimKeypair();
+    db.meta.dkim = {
+      domain,
+      selector,
+      privateKey: encryptIfPossible(pair.privateKey),
+      createdAt: nowIso(),
+    };
+    db.meta.dkimRotatedAt = nowIso();
+    configureDkim({ domain, selector, privateKey: pair.privateKey });
+    logAudit("warn", "sending.dkim.rotate", `${me.email} rotated the DKIM key (selector ${selector})`, "security");
+    saveDb();
+    send(res, 200, {
+      domain,
+      selector,
+      host: `${selector}._domainkey.${domain}`,
+      record: `v=DKIM1; k=rsa; p=${pair.publicKeyBase64}`,
+      rotatedAt: db.meta.dkimRotatedAt,
+      note: "Publish this record, then press Check. Mail is already being signed with the new key.",
+    });
+    return;
+  }
+
   /* ---------------- sending ---------------- */
 
   /** What the delivery pipeline is capable of right now. */
@@ -1938,6 +2062,23 @@ loadDb();
 
 const sender = createSender({ db, saveDb, broadcast, logAudit, uid, nowIso });
 sender.start();
+loadDkim();
+
+/**
+ * Use the DKIM key stored in the database, so a rotation done in the studio
+ * survives a restart. The environment variable is only the bootstrap.
+ */
+function loadDkim() {
+  const stored = db.meta?.dkim;
+  if (stored?.privateKey) {
+    configureDkim({
+      domain: stored.domain,
+      selector: stored.selector,
+      privateKey: decrypt(stored.privateKey),
+    });
+    console.log(`DKIM signing as ${stored.selector}._domainkey.${stored.domain} (from database).`);
+  }
+}
 
 createServer((req, res) => {
   handle(req, res).catch((err) => {

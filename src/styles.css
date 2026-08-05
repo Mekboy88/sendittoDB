@@ -5440,3 +5440,27 @@ tr.bulk-selected .bulk-col {
 .fraud-low { border-color: #7bc99a; }
 .fraud-medium { border-color: #e8b84a; }
 .fraud-high { border-color: #f08080; }
+
+/* —— Sending setup: DNS records —— */
+.dns-records { display: grid; gap: 12px; }
+.dns-record { padding: 14px; border: 1px solid var(--line); border-radius: 11px; background: var(--bg); }
+.dns-record.is-live { border-color: #7bc99a; }
+.dns-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.dns-head b { display: block; font-size: 13px; }
+.dns-head small { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
+.dns-value { display: flex; align-items: flex-start; gap: 8px; }
+.dns-value code {
+  flex: 1 1 auto; min-width: 0; padding: 10px 12px; border-radius: 8px;
+  background: var(--card); border: 1px solid var(--line);
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all; white-space: pre-wrap; color: var(--ink);
+}
+.dns-value .copy-btn { flex: 0 0 auto; }
+.dns-detail { margin-top: 8px; font-size: 12px; color: var(--muted); }
+.form-row { display: flex; gap: 8px; }
+.form-row input {
+  flex: 1 1 auto; padding: 10px 12px; border: 1px solid var(--line);
+  border-radius: 9px; background: var(--card); color: var(--ink); font-size: 14px;
+}
+.panel-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.btn.warn { border-color: #e8b84a; }
