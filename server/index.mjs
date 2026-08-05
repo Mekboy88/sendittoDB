@@ -18,6 +18,19 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
+import {
+  decrypt,
+  encryptIfPossible,
+  encryptionReady,
+  hashPassword,
+  hashSecret,
+  isHashed,
+  verifyPassword,
+  verifySecret,
+} from "./crypto.mjs";
+import { mailerReady, mailerStatus } from "./mailer.mjs";
+import { verifyDomain } from "./dnscheck.mjs";
+import { STREAMS, createSender, hint, publicMessage } from "./sending.mjs";
 
 const PORT = Number(process.env.PORT || 5181);
 const DATA_DIR = join(dirname(fileURLToPath(import.meta.url)), "data");
@@ -68,11 +81,26 @@ function loadDb() {
   try {
     db = JSON.parse(readFileSync(DB_FILE, "utf8"));
     if (!db || !Array.isArray(db.users)) throw new Error("corrupt");
-    return;
   } catch {
     db = seed();
-    saveDb();
   }
+  migratePasswords();
+  saveDb();
+}
+
+/**
+ * Older databases kept passwords as readable text. Replace any that remain
+ * with a scrypt hash on boot, so a copy of the file reveals nothing.
+ */
+function migratePasswords() {
+  let changed = 0;
+  for (const user of db.users) {
+    if (user.password && !isHashed(user.password)) {
+      user.password = hashPassword(user.password);
+      changed++;
+    }
+  }
+  if (changed) console.log(`Secured ${changed} stored password${changed === 1 ? "" : "s"} (scrypt).`);
 }
 
 /* ============================ seed data ============================ */
@@ -108,7 +136,7 @@ function seed() {
       company: extra.company || "",
       country: extra.country || "",
       two_factor_enabled: role === "owner",
-      password: extra.password || "senditto-dev",
+      password: hashPassword(extra.password || "senditto-dev"),
       created_at: isoAgo(90 * 864e5 * rand() + 864e5),
       last_seen: isoAgo(rand() * 3 * 864e5),
     };
@@ -470,6 +498,22 @@ function userOf(session) {
   return db.users.find((u) => u.id === session.user_id) || null;
 }
 
+/**
+ * Shape any stored row for a client: encrypted fields are shown as their
+ * readable value where the viewer is entitled to it, and never as ciphertext.
+ */
+function publicRow(row) {
+  if (!row || typeof row !== "object") return row;
+  let out = row;
+  for (const field of ["email", "body", "body_text", "body_html", "subject"]) {
+    if (typeof row[field] === "string" && row[field].startsWith("enc:v1:")) {
+      if (out === row) out = { ...row };
+      out[field] = decrypt(row[field]);
+    }
+  }
+  return out;
+}
+
 function publicUser(u) {
   if (!u) return null;
   const { password, ...rest } = u;
@@ -664,6 +708,15 @@ const COLLECTIONS = {
 
 /** Roles that operate Senditto itself, as opposed to product customers. */
 const STAFF_ROLES = ["owner", "admin", "operator", "support"];
+
+/** May this account act inside this workspace? Staff may act anywhere. */
+function canUseWorkspace(me, workspaceId) {
+  if (STAFF_ROLES.includes(me.role)) return true;
+  if (!workspaceId) return false;
+  return db.workspaces.some(
+    (w) => w.id === workspaceId && (w.owner_user_id === me.id || w.owner_email === me.email)
+  );
+}
 /** Collections a product customer must never reach. */
 const STAFF_ONLY_COLLECTIONS = new Set(["users", "rights", "internal-messages"]);
 
@@ -721,7 +774,7 @@ async function handle(req, res) {
       company: String(body.company || "").trim(),
       country: "",
       two_factor_enabled: false,
-      password,
+      password: hashPassword(password),
       created_at: nowIso(),
       last_seen: nowIso(),
     };
@@ -764,7 +817,7 @@ async function handle(req, res) {
     const body = await readBody(req);
     const email = String(body.email || "").toLowerCase().trim();
     const user = db.users.find((u) => u.email.toLowerCase() === email);
-    if (!user || user.password !== String(body.password || "")) {
+    if (!user || !verifyPassword(body.password || "", user.password)) {
       send(res, 401, { error: "Invalid email or password" });
       return;
     }
@@ -817,6 +870,220 @@ async function handle(req, res) {
     return;
   }
 
+  /* ---------------- sending ---------------- */
+
+  /** What the delivery pipeline is capable of right now. */
+  if (path === "/api/send/status") {
+    send(res, 200, {
+      mailer: mailerStatus(),
+      encryptionAtRest: encryptionReady(),
+      streams: Object.entries(STREAMS).map(([id, s]) => ({ id, ...s })),
+      queued: db.messages.filter((m) => m.status === "queued").length,
+    });
+    return;
+  }
+
+  /** Send one message: transactional, notification or marketing. */
+  if (path === "/api/send" && method === "POST") {
+    const body = await readBody(req);
+    const workspaceId = body.workspaceId || body.workspace_id || null;
+    if (!canUseWorkspace(me, workspaceId)) {
+      send(res, 403, { error: "That workspace is not yours" });
+      return;
+    }
+    if (!mailerReady()) {
+      send(res, 503, {
+        error: "Email delivery is not configured yet. Set SMTP_HOST and SMTP_FROM on the server.",
+      });
+      return;
+    }
+    const result = sender.enqueue({
+      workspaceId,
+      stream: body.stream || "transactional",
+      from: body.from,
+      to: body.to,
+      subject: body.subject,
+      text: body.text,
+      html: body.html,
+      replyTo: body.replyTo,
+      meta: { sentBy: me.email },
+    });
+    if (result.error) {
+      send(res, result.code || 422, { error: result.error });
+      return;
+    }
+    send(res, 202, { message: publicMessage(result.row) });
+    return;
+  }
+
+  /** Issue a one-time passcode by email. The code is never stored in clear. */
+  if (path === "/api/otp/send" && method === "POST") {
+    const body = await readBody(req);
+    const workspaceId = body.workspaceId || body.workspace_id || null;
+    if (!canUseWorkspace(me, workspaceId)) {
+      send(res, 403, { error: "That workspace is not yours" });
+      return;
+    }
+    if (!mailerReady()) {
+      send(res, 503, { error: "Email delivery is not configured yet." });
+      return;
+    }
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const ttl = STREAMS.otp.ttlMinutes;
+    const purpose = String(body.purpose || "sign-in");
+    const result = sender.enqueue({
+      workspaceId,
+      stream: "otp",
+      from: body.from,
+      to: body.to,
+      subject: `Your ${purpose} code: ${code}`,
+      text: `Your Senditto ${purpose} code is ${code}. It expires in ${ttl} minutes. If you did not request it, ignore this email.`,
+      html: `<p>Your Senditto ${purpose} code is</p><p style="font:600 28px/1.2 system-ui;letter-spacing:.16em">${code}</p><p>It expires in ${ttl} minutes. If you did not request it, ignore this email.</p>`,
+      meta: { purpose },
+    });
+    if (result.error) {
+      send(res, result.code || 422, { error: result.error });
+      return;
+    }
+    db.otp_codes = db.otp_codes || [];
+    db.otp_codes.push({
+      id: uid("otp"),
+      workspace_id: workspaceId,
+      email: encryptIfPossible(String(body.to).toLowerCase()),
+      email_hint: hint(String(body.to).toLowerCase()),
+      code_hash: hashSecret(code),
+      purpose,
+      consumed: false,
+      attempts: 0,
+      created_at: nowIso(),
+      expires_at: new Date(Date.now() + ttl * 60000).toISOString(),
+    });
+    saveDb();
+    // The code itself is returned to nobody: it only exists in the email.
+    send(res, 202, { messageId: result.row.id, expiresAt: db.otp_codes.at(-1).expires_at });
+    return;
+  }
+
+  /** Check a passcode. Wrong or expired codes are rejected and counted. */
+  if (path === "/api/otp/verify" && method === "POST") {
+    const body = await readBody(req);
+    const email = String(body.email || "").toLowerCase();
+    db.otp_codes = db.otp_codes || [];
+    const entry = [...db.otp_codes]
+      .reverse()
+      .find((o) => !o.consumed && decrypt(o.email) === email && o.purpose === String(body.purpose || "sign-in"));
+    if (!entry) {
+      send(res, 404, { error: "No code was issued for that address" });
+      return;
+    }
+    if (new Date(entry.expires_at).getTime() < Date.now()) {
+      send(res, 410, { error: "That code has expired" });
+      return;
+    }
+    entry.attempts += 1;
+    if (entry.attempts > 5) {
+      entry.consumed = true;
+      saveDb();
+      send(res, 429, { error: "Too many attempts — request a new code" });
+      return;
+    }
+    if (!verifySecret(String(body.code || ""), entry.code_hash)) {
+      saveDb();
+      send(res, 401, { error: "That code is not correct" });
+      return;
+    }
+    entry.consumed = true;
+    entry.consumed_at = nowIso();
+    logAudit("success", "otp.verified", `Passcode verified for ${entry.email_hint}`, "security");
+    saveDb();
+    send(res, 200, { ok: true });
+    return;
+  }
+
+  /** Send a campaign to every subscribed contact in its workspace. */
+  if (path.match(/^\/api\/campaigns\/[^/]+\/send$/) && method === "POST") {
+    const campaign = db.campaigns.find((c) => c.id === path.split("/")[3]);
+    if (!campaign) {
+      send(res, 404, { error: "Campaign not found" });
+      return;
+    }
+    if (!canUseWorkspace(me, campaign.workspace_id)) {
+      send(res, 403, { error: "That campaign is not yours" });
+      return;
+    }
+    if (!mailerReady()) {
+      send(res, 503, { error: "Email delivery is not configured yet." });
+      return;
+    }
+    // Exactly "subscribed" — "Unsubscribed" also contains the word, and
+    // mailing those people would break both the law and their trust.
+    const audience = db.contacts.filter(
+      (c) => c.workspace_id === campaign.workspace_id && /^subscribed$/i.test(String(c.status || "").trim())
+    );
+    let queued = 0;
+    const skipped = [];
+    for (const contact of audience) {
+      const result = sender.enqueue({
+        workspaceId: campaign.workspace_id,
+        stream: "marketing",
+        from: campaign.from_email,
+        to: decrypt(contact.email),
+        subject: campaign.subject || campaign.name,
+        html: campaign.body || `<p>${campaign.subject || campaign.name}</p>`,
+        text: campaign.body_text || campaign.subject || campaign.name,
+        meta: { campaignId: campaign.id },
+      });
+      if (result.error) skipped.push({ to: hint(decrypt(contact.email)), reason: result.error });
+      else queued++;
+    }
+    campaign.status = queued ? "Sending" : campaign.status;
+    campaign.sent = (campaign.sent || 0) + queued;
+    campaign.updated_at = nowIso();
+    logAudit("info", "campaign.send", `${me.email} sent “${campaign.name}” to ${queued} contacts`, "campaigns", {
+      workspace_id: campaign.workspace_id,
+    });
+    broadcast({ type: "change", collection: "campaigns", event: "updated", id: campaign.id, row: campaign });
+    saveDb();
+    send(res, 202, { queued, skipped, audience: audience.length });
+    return;
+  }
+
+  /** Verify a domain against real public DNS. */
+  if (path.match(/^\/api\/domains\/[^/]+\/verify$/) && method === "POST") {
+    const domain = db.domains.find((d) => d.id === path.split("/")[3]);
+    if (!domain) {
+      send(res, 404, { error: "Domain not found" });
+      return;
+    }
+    if (!canUseWorkspace(me, domain.workspace_id)) {
+      send(res, 403, { error: "That domain is not yours" });
+      return;
+    }
+    const result = await verifyDomain(domain.domain, {
+      selector: process.env.DKIM_SELECTOR || "senditto",
+      spfInclude: process.env.SPF_INCLUDE || "",
+    });
+    domain.spf = result.spf?.ok || false;
+    domain.dkim = result.dkim?.ok || false;
+    domain.dmarc = result.dmarc?.ok || false;
+    domain.status = result.status || "pending";
+    domain.last_check = result.checkedAt;
+    domain.check_detail = {
+      spf: result.spf?.reason,
+      dkim: result.dkim?.reason,
+      dmarc: result.dmarc?.reason,
+      mx: result.mx?.reason,
+    };
+    domain.updated_at = nowIso();
+    logAudit(result.ok ? "success" : "warn", "domain.verify", `${domain.domain} checked: ${domain.status}`, "domains", {
+      workspace_id: domain.workspace_id,
+    });
+    broadcast({ type: "change", collection: "domains", event: "updated", id: domain.id, row: domain });
+    saveDb();
+    send(res, 200, result);
+    return;
+  }
+
   /* Everything the signed-in account may see in the product UI.
      Staff roles get the full picture; a customer only ever gets their own. */
   if (path === "/api/platform/state") {
@@ -832,9 +1099,9 @@ async function handle(req, res) {
       workspaces: mine,
       domains: scoped(db.domains),
       keys: scoped(db.api_keys),
-      messages: scoped(db.messages),
-      suppressions: scoped(db.suppressions),
-      contacts: scoped(db.contacts),
+      messages: scoped(db.messages).map(publicMessage),
+      suppressions: scoped(db.suppressions).map(publicRow),
+      contacts: scoped(db.contacts).map(publicRow),
       templates: scoped(db.templates),
       campaigns: scoped(db.campaigns),
       webhooks: scoped(db.webhooks),
@@ -865,8 +1132,8 @@ async function handle(req, res) {
       workspaces: db.workspaces,
       domains: db.domains,
       api_keys: db.api_keys,
-      messages: db.messages,
-      suppressions: db.suppressions,
+      messages: db.messages.map(publicMessage),
+      suppressions: db.suppressions.map(publicRow),
       audit_log: db.audit,
       rights_requests: db.rights,
       sessions: db.sessions.map(({ token, ...s }) => s),
@@ -1034,11 +1301,40 @@ async function handle(req, res) {
       send(res, 404, { error: "Webhook not found" });
       return;
     }
-    hook.success = (hook.success || 0) + 1;
+    // Actually call the endpoint and report what it answered.
+    const payload = {
+      event: "webhook.test",
+      webhook_id: hook.id,
+      workspace_id: hook.workspace_id,
+      at: nowIso(),
+    };
+    let outcome;
+    try {
+      const started = Date.now();
+      const r = await fetch(hook.url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Senditto-Event": "webhook.test" },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(10000),
+      });
+      outcome = { ok: r.ok, status: r.status, ms: Date.now() - started };
+      hook[r.ok ? "success" : "failures"] = (hook[r.ok ? "success" : "failures"] || 0) + 1;
+      hook.last_status = r.status;
+      hook.last_error = r.ok ? null : `Endpoint answered ${r.status}`;
+    } catch (e) {
+      outcome = { ok: false, status: 0, error: String(e.message || e).slice(0, 200) };
+      hook.failures = (hook.failures || 0) + 1;
+      hook.last_status = 0;
+      hook.last_error = outcome.error;
+    }
+    hook.last_delivery_at = nowIso();
     hook.updated_at = nowIso();
-    logAudit("info", "webhook.test", `Test event queued to “${hook.name}”`, "webhooks", { workspace_id: hook.workspace_id });
+    logAudit(outcome.ok ? "success" : "warn", "webhook.test",
+      `Test to “${hook.name}” ${outcome.ok ? `succeeded (${outcome.status})` : `failed (${outcome.error || outcome.status})`}`,
+      "webhooks", { workspace_id: hook.workspace_id });
+    broadcast({ type: "change", collection: "webhooks", event: "updated", id: hook.id, row: hook });
     saveDb();
-    send(res, 200, { ok: true });
+    send(res, outcome.ok ? 200 : 502, outcome);
     return;
   }
 
@@ -1072,7 +1368,9 @@ async function handle(req, res) {
 
     if (method === "GET" && !id) {
       const visible = staff ? rows : rows.filter(mayTouch);
-      send(res, 200, { rows: visible, total: visible.length });
+      // Never hand out stored ciphertext or a full recipient address.
+      const shaped = kind === "messages" ? visible.map(publicMessage) : visible.map(publicRow);
+      send(res, 200, { rows: shaped, total: shaped.length });
       return;
     }
 
@@ -1173,7 +1471,7 @@ function createRow(kind, prefix, body, me) {
           company: "",
           country: "",
           two_factor_enabled: false,
-          password: temporaryPassword,
+          password: hashPassword(temporaryPassword),
           last_seen: null,
         },
         topLevel: body.password ? {} : { temporaryPassword },
@@ -1369,7 +1667,7 @@ function patchRow(kind, row, body) {
       set("company", body.company);
       set("country", body.country);
       if (body.twoFactorEnabled !== undefined) row.two_factor_enabled = !!body.twoFactorEnabled;
-      if (body.password) row.password = body.password;
+      if (body.password) row.password = hashPassword(body.password);
       break;
     case "workspaces":
       set("name", body.name);
@@ -1456,6 +1754,9 @@ function patchRow(kind, row, body) {
 /* ============================ boot ============================ */
 
 loadDb();
+
+const sender = createSender({ db, saveDb, broadcast, logAudit, uid, nowIso });
+sender.start();
 
 createServer((req, res) => {
   handle(req, res).catch((err) => {
