@@ -133,7 +133,13 @@ itissendittodb.com, www.itissendittodb.com {
 	}
 }
 
-senditto.dev, www.senditto.dev {
+# One canonical host. Cookies are host-only, so a visitor who lands on www
+# would not be sent the session set on the apex and would look signed out.
+www.senditto.dev {
+	redir https://senditto.dev{uri} permanent
+}
+
+senditto.dev {
 	reverse_proxy 127.0.0.1:3000
 }
 CADDY
