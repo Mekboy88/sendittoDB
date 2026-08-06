@@ -128,6 +128,10 @@ itissendittodb.com, www.itissendittodb.com {
 	}
 	handle {
 		root * /opt/senditto/sendittoDB/dist
+		# The page names its hashed assets, so it must always be re-checked —
+		# a cached page keeps loading last week's code.
+		@page path / *.html
+		header @page Cache-Control "no-cache, must-revalidate"
 		try_files {path} /index.html
 		file_server
 	}
@@ -140,6 +144,9 @@ www.senditto.dev {
 }
 
 senditto.dev {
+	# Same rule: never let a browser keep the page that names the app's files.
+	@page path / *.html
+	header @page Cache-Control "no-cache, must-revalidate"
 	reverse_proxy 127.0.0.1:3000
 }
 CADDY
