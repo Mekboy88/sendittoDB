@@ -47,6 +47,12 @@ const OWNER_EMAIL = process.env.OWNER_EMAIL || process.env.DEV_OWNER_EMAIL || "o
 const OWNER_PASSWORD = process.env.OWNER_PASSWORD || process.env.DEV_OWNER_PASSWORD || "senditto-owner";
 // SEED_DEMO=0 seeds only the owner account (production); default seeds full demo data (dev).
 const SEED_DEMO = process.env.SEED_DEMO !== "0";
+/**
+ * How long a session stays valid without being used. It is a *rolling* window:
+ * every authenticated request pushes the expiry back, so an account in regular
+ * use is never signed out, and only a genuinely idle one lapses.
+ */
+const SESSION_TTL_MS = Number(process.env.SESSION_TTL_HOURS || 720) * 3600 * 1000;
 const START_TS = Date.now();
 
 /* ============================ tiny utils ============================ */
@@ -499,6 +505,14 @@ function sessionFor(req) {
     return null;
   }
   s.last_seen_at = nowIso();
+  // Roll the window forward. Throttled, so a busy client does not rewrite the
+  // database on every single request.
+  const expiresAt = new Date(s.expires_at).getTime();
+  const target = Date.now() + SESSION_TTL_MS;
+  if (target - expiresAt > 10 * 60 * 1000) {
+    s.expires_at = new Date(target).toISOString();
+    saveDb();
+  }
   return s;
 }
 
@@ -921,7 +935,7 @@ async function handle(req, res) {
       purpose: String(body.purpose || "platform"),
       created_at: nowIso(),
       last_seen_at: nowIso(),
-      expires_at: new Date(Date.now() + 12 * 3600 * 1000).toISOString(),
+      expires_at: new Date(Date.now() + SESSION_TTL_MS).toISOString(),
     });
     logAudit("success", "auth.register", `${user.email} created an account`, "security");
     // Screen the new account in the background: never make signup wait on it,
@@ -956,7 +970,7 @@ async function handle(req, res) {
       purpose: String(body.purpose || "studio"),
       created_at: nowIso(),
       last_seen_at: nowIso(),
-      expires_at: new Date(Date.now() + 12 * 3600 * 1000).toISOString(),
+      expires_at: new Date(Date.now() + SESSION_TTL_MS).toISOString(),
     };
     db.sessions.push(session);
     user.last_seen = nowIso();
@@ -983,6 +997,20 @@ async function handle(req, res) {
 
   if (path === "/api/auth/2fa/setup" && method === "POST") {
     send(res, 200, { twoFactorSecret: randomBytes(10).toString("hex").toUpperCase() });
+    return;
+  }
+
+  /**
+   * Who am I, and how long is this session good for? Reaching this endpoint
+   * has already rolled the expiry forward, so the caller can refresh its own
+   * cookie to match and stay signed in.
+   */
+  if (path === "/api/auth/session") {
+    send(res, 200, {
+      user: { ...publicUser(me), displayName: me.display_name },
+      expiresAt: session.expires_at,
+      purpose: session.purpose,
+    });
     return;
   }
 
