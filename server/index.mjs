@@ -975,6 +975,7 @@ async function handle(req, res) {
     db.sessions.push(session);
     user.last_seen = nowIso();
     logAudit("success", "auth.login", `${user.email} signed in (${session.purpose})`, "security");
+    broadcast({ type: "change", collection: "sessions", event: "created", id: session.id });
     saveDb();
     send(res, 200, { token, expiresAt: session.expires_at, user: publicUser(user) });
     return;
@@ -990,6 +991,7 @@ async function handle(req, res) {
 
   if (path === "/api/auth/logout" && method === "POST") {
     db.sessions = db.sessions.filter((s) => s.token !== session.token);
+    broadcast({ type: "change", collection: "sessions", event: "deleted", id: session.id });
     saveDb();
     send(res, 200, { ok: true });
     return;
@@ -1577,6 +1579,7 @@ async function handle(req, res) {
     const target = db.sessions.find((s) => s.id === id);
     db.sessions = db.sessions.filter((s) => s.id !== id);
     if (target) logAudit("warn", "sessions.revoke", `${me.email} revoked a session for ${target.email}`, "security");
+    broadcast({ type: "change", collection: "sessions", event: "deleted", id });
     saveDb();
     send(res, 200, { ok: true });
     return;
@@ -1606,6 +1609,7 @@ async function handle(req, res) {
     target.role = String(body.role || target.role);
     target.updated_at = nowIso();
     logAudit("warn", "roles.grant", `${me.email} granted ${target.role} to ${target.email}`, "security");
+    broadcast({ type: "change", collection: "users", event: "updated", id: target.id, row: publicUser(target) });
     saveDb();
     send(res, 200, { row: publicUser(target) });
     return;
@@ -1623,6 +1627,7 @@ async function handle(req, res) {
     key.last_used = null;
     key.updated_at = nowIso();
     logAudit("warn", "keys.rotate", `${me.email} rotated API key “${key.name}”`, "keys");
+    broadcast({ type: "change", collection: "keys", event: "updated", id: key.id, row: key });
     saveDb();
     send(res, 200, { ...key, secret });
     return;
