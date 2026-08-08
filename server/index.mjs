@@ -855,6 +855,32 @@ function canUseWorkspace(me, workspaceId) {
     (w) => w.id === workspaceId && (w.owner_user_id === me.id || w.owner_email === me.email)
   );
 }
+
+/** The workspaces a person owns, newest first. */
+function ownedWorkspaces(me) {
+  return db.workspaces.filter((w) => w.owner_user_id === me.id || w.owner_email === me.email);
+}
+
+/**
+ * Work out which workspace an action belongs to.
+ *
+ * Leaving it out is the normal case, not a mistake: a customer with one
+ * workspace should never have to name it, and treating "unspecified" as
+ * "denied" locked every new account out of sending. Staff who leave it out
+ * mean the platform as a whole.
+ *
+ * @returns {{workspaceId: string|null}|{error: string, code: number}}
+ */
+function resolveWorkspace(me, requested) {
+  if (requested) {
+    if (!canUseWorkspace(me, requested)) return { error: "That workspace is not yours", code: 403 };
+    return { workspaceId: requested };
+  }
+  if (STAFF_ROLES.includes(me.role)) return { workspaceId: null };
+  const mine = ownedWorkspaces(me);
+  if (!mine.length) return { error: "Create a workspace before sending", code: 422 };
+  return { workspaceId: mine[0].id };
+}
 /** Collections a product customer must never reach. */
 const STAFF_ONLY_COLLECTIONS = new Set(["users", "rights", "internal-messages"]);
 
@@ -1323,11 +1349,12 @@ async function handle(req, res) {
   /** Send one message: transactional, notification or marketing. */
   if (path === "/api/send" && method === "POST") {
     const body = await readBody(req);
-    const workspaceId = body.workspaceId || body.workspace_id || null;
-    if (!canUseWorkspace(me, workspaceId)) {
-      send(res, 403, { error: "That workspace is not yours" });
+    const scope = resolveWorkspace(me, body.workspaceId || body.workspace_id || null);
+    if (scope.error) {
+      send(res, scope.code, { error: scope.error });
       return;
     }
+    const workspaceId = scope.workspaceId;
     if (!mailerReady()) {
       send(res, 503, {
         error: "Email delivery is not configured yet. Set SMTP_HOST and SMTP_FROM on the server.",
@@ -1357,11 +1384,12 @@ async function handle(req, res) {
   /** Issue a one-time passcode by email. The code is never stored in clear. */
   if (path === "/api/otp/send" && method === "POST") {
     const body = await readBody(req);
-    const workspaceId = body.workspaceId || body.workspace_id || null;
-    if (!canUseWorkspace(me, workspaceId)) {
-      send(res, 403, { error: "That workspace is not yours" });
+    const scope = resolveWorkspace(me, body.workspaceId || body.workspace_id || null);
+    if (scope.error) {
+      send(res, scope.code, { error: scope.error });
       return;
     }
+    const workspaceId = scope.workspaceId;
     if (!mailerReady()) {
       send(res, 503, { error: "Email delivery is not configured yet." });
       return;
@@ -1839,13 +1867,13 @@ async function handle(req, res) {
           });
           return;
         }
-        const workspaceId = body.workspaceId || body.workspace_id || null;
-        if (!canUseWorkspace(me, workspaceId)) {
-          send(res, 403, { error: "That workspace is not yours" });
+        const scope = resolveWorkspace(me, body.workspaceId || body.workspace_id || null);
+        if (scope.error) {
+          send(res, scope.code, { error: scope.error });
           return;
         }
         const queued = sender.enqueue({
-          workspaceId,
+          workspaceId: scope.workspaceId,
           stream: String(body.stream || "transactional").toLowerCase(),
           from: body.from || body.from_email,
           to: body.to || body.to_email,
