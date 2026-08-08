@@ -147,7 +147,17 @@ senditto.dev {
 	# Same rule: never let a browser keep the page that names the app's files.
 	@page path / *.html
 	header @page >Cache-Control "no-cache, must-revalidate"
-	reverse_proxy 127.0.0.1:3000
+
+	# Open and click tracking. These are the only control-API paths reachable
+	# from the product domain, and they are public by design — an inbox has to
+	# be able to load them. No operator surface is exposed here.
+	handle /t/* {
+		reverse_proxy 127.0.0.1:5181
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
 }
 CADDY
 systemctl enable caddy

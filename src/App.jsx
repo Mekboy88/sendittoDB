@@ -25,6 +25,7 @@ import {
   Webhook,
   Brain,
   Send,
+  BarChart3,
 } from "lucide-react";
 import { api, emitDataChange, loadSession, openRealtime, redact, saveSession } from "./api.js";
 import { roleLabel } from "./roles.js";
@@ -48,6 +49,7 @@ import {
 import { AIBrainPage } from "./pages-ai.jsx";
 import { SendingSetupPage } from "./pages-sending.jsx";
 import { ActivityPage } from "./pages-activity.jsx";
+import { AnalyticsPage } from "./pages-analytics.jsx";
 import {
   CampaignsPage,
   ContactsPage,
@@ -101,6 +103,7 @@ const NAV = [
   { id: "keys", label: "API keys", icon: KeyRound, group: "Platform" },
   { id: "messages", label: "Messages", icon: Mail, group: "Platform" },
   { id: "activity", label: "Email activity", icon: Activity, group: "Platform" },
+  { id: "analytics", label: "Analytics", icon: BarChart3, group: "Platform" },
   { id: "contacts", label: "Contacts", icon: Contact, group: "Product" },
   { id: "templates", label: "Templates", icon: FileText, group: "Product" },
   { id: "campaigns", label: "Campaigns", icon: Megaphone, group: "Product" },
@@ -396,6 +399,7 @@ export default function App() {
           {page === "brain" ? <AIBrainPage token={token} session={session} /> : null}
           {page === "sending" ? <SendingSetupPage token={token} session={session} /> : null}
           {page === "activity" ? <ActivityPage token={token} /> : null}
+          {page === "analytics" ? <AnalyticsPage token={token} /> : null}
           {page === "tables" ? <TablesPage token={token} overview={overview} /> : null}
           {page === "workspaces" ? <WorkspacesPage token={token} onChanged={refresh} /> : null}
           {page === "users" ? (

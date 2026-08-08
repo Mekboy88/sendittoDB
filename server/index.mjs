@@ -38,6 +38,7 @@ import {
 } from "./mailer.mjs";
 import { verifyDomain } from "./dnscheck.mjs";
 import { STREAMS, createSender, hint, publicMessage } from "./sending.mjs";
+import { computeAnalytics } from "./analytics.mjs";
 import { aiStatus, assistantAsk, brainAsk, fraudScore } from "./ai.mjs";
 
 const PORT = Number(process.env.PORT || 5181);
@@ -1088,6 +1089,32 @@ async function handle(req, res) {
       .filter((e) => e.message_id === messageId)
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     send(res, 200, { message: publicMessage(row), events });
+    return;
+  }
+
+  /**
+   * Analytics. One computation serves both interfaces, so the studio and the
+   * product can never show different numbers for the same question.
+   */
+  if (path === "/api/analytics") {
+    const staff = STAFF_ROLES.includes(me.role);
+    const requested = url.searchParams.get("workspaceId");
+    let workspaceIds = null; // null means everything, for staff
+    if (!staff || requested) {
+      const owned = db.workspaces.filter(
+        (w) => staff || w.owner_user_id === me.id || w.owner_email === me.email
+      );
+      if (requested && !owned.some((w) => w.id === requested)) {
+        send(res, 403, { error: "That workspace is not yours" });
+        return;
+      }
+      workspaceIds = new Set(requested ? [requested] : owned.map((w) => w.id));
+    }
+    send(res, 200, computeAnalytics(db, {
+      workspaceIds,
+      rangeDays: Number(url.searchParams.get("days") || 30),
+      stream: url.searchParams.get("stream") || "all",
+    }));
     return;
   }
 

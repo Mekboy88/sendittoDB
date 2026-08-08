@@ -267,13 +267,37 @@ export function createSender(ctx) {
   }
 
   /** Work the queue. */
+  // A message being delivered right now. Delivery is asynchronous, so without
+  // this two overlapping runs of the queue can both pick up the same row and
+  // send it twice — the recipient gets the email more than once.
+  const inFlight = new Set();
+  let ticking = false;
+
   async function tick() {
-    if (!mailerReady()) return;
-    const now = Date.now();
-    const due = db.messages
-      .filter((m) => m.status === "queued" && new Date(m.next_attempt_at || 0).getTime() <= now)
-      .slice(0, 20);
-    for (const row of due) await deliver(row);
+    if (!mailerReady() || ticking) return;
+    ticking = true;
+    try {
+      const now = Date.now();
+      const due = db.messages
+        .filter(
+          (m) =>
+            m.status === "queued" &&
+            !inFlight.has(m.id) &&
+            new Date(m.next_attempt_at || 0).getTime() <= now
+        )
+        .slice(0, 20);
+
+      // Claim the whole batch before awaiting anything, so nothing else can
+      // take these rows while the first send is in progress.
+      for (const row of due) inFlight.add(row.id);
+      try {
+        for (const row of due) await deliver(row);
+      } finally {
+        for (const row of due) inFlight.delete(row.id);
+      }
+    } finally {
+      ticking = false;
+    }
   }
 
   function kick() {
