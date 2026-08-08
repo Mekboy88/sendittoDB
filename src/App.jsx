@@ -47,6 +47,7 @@ import {
 } from "./pages.jsx";
 import { AIBrainPage } from "./pages-ai.jsx";
 import { SendingSetupPage } from "./pages-sending.jsx";
+import { ActivityPage } from "./pages-activity.jsx";
 import {
   CampaignsPage,
   ContactsPage,
@@ -99,6 +100,7 @@ const NAV = [
   { id: "domains", label: "Domains", icon: Globe, group: "Platform" },
   { id: "keys", label: "API keys", icon: KeyRound, group: "Platform" },
   { id: "messages", label: "Messages", icon: Mail, group: "Platform" },
+  { id: "activity", label: "Email activity", icon: Activity, group: "Platform" },
   { id: "contacts", label: "Contacts", icon: Contact, group: "Product" },
   { id: "templates", label: "Templates", icon: FileText, group: "Product" },
   { id: "campaigns", label: "Campaigns", icon: Megaphone, group: "Product" },
@@ -393,6 +395,7 @@ export default function App() {
           ) : null}
           {page === "brain" ? <AIBrainPage token={token} session={session} /> : null}
           {page === "sending" ? <SendingSetupPage token={token} session={session} /> : null}
+          {page === "activity" ? <ActivityPage token={token} /> : null}
           {page === "tables" ? <TablesPage token={token} overview={overview} /> : null}
           {page === "workspaces" ? <WorkspacesPage token={token} onChanged={refresh} /> : null}
           {page === "users" ? (

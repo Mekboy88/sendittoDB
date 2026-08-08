@@ -31,6 +31,30 @@ export function createSender(ctx) {
   const { db, saveDb, broadcast, logAudit, uid, nowIso } = ctx;
   let timer = null;
 
+  /**
+   * Every step a message takes is recorded, so the activity view shows what
+   * actually happened and when — not a timeline guessed from the current
+   * status. Kept newest-first and capped, because this is the busiest table.
+   */
+  function record(row, type, detail = {}) {
+    if (!Array.isArray(db.message_events)) db.message_events = [];
+    const event = {
+      id: uid("mev"),
+      message_id: row.id,
+      workspace_id: row.workspace_id,
+      stream: row.stream,
+      type,
+      attempt: row.attempts || 0,
+      detail: detail.text || null,
+      provider_response: detail.provider || null,
+      created_at: nowIso(),
+    };
+    db.message_events.unshift(event);
+    if (db.message_events.length > 5000) db.message_events.length = 5000;
+    broadcast({ type: "change", collection: "message-events", event: "created", id: event.id, row: event });
+    return event;
+  }
+
   const suppressed = (workspaceId, email) =>
     db.suppressions.some(
       (s) =>
@@ -85,6 +109,7 @@ export function createSender(ctx) {
       sent_at: null,
     };
     db.messages.unshift(row);
+    record(row, "queued");
     logAudit("info", "message.queued", `Queued ${STREAMS[stream].label} to ${row.to_hint}`, "messages", {
       workspace_id: workspaceId,
     });
@@ -99,6 +124,7 @@ export function createSender(ctx) {
     row.status = "sending";
     row.attempts += 1;
     row.updated_at = nowIso();
+    record(row, "sending");
 
     const stream = STREAMS[row.stream] || STREAMS.transactional;
     const to = decrypt(row.to_email);
@@ -119,7 +145,7 @@ export function createSender(ctx) {
         to,
         subject: decrypt(row.subject),
         text: decrypt(row.body_text) || undefined,
-        html: decrypt(row.body_html) || undefined,
+        html: withTracking(decrypt(row.body_html), row, stream) || undefined,
         replyTo: row.reply_to || undefined,
         headers,
       });
@@ -128,6 +154,7 @@ export function createSender(ctx) {
       row.provider_response = result.response || "accepted";
       row.dkim_signed = result.signed;
       row.last_error = null;
+      record(row, "delivered", { provider: result.response || "accepted" });
       logAudit("success", "message.delivered", `Delivered to ${row.to_hint}`, "messages", {
         workspace_id: row.workspace_id,
       });
@@ -139,6 +166,7 @@ export function createSender(ctx) {
       const permanent = /SMTP 5\d\d/.test(message) || /invalid/i.test(message);
       if (permanent || row.attempts >= MAX_ATTEMPTS) {
         row.status = permanent ? "bounced" : "failed";
+        record(row, row.status, { text: message });
         if (row.status === "bounced") addSuppression(row, message);
         logAudit("error", "message.failed", `${row.status} to ${row.to_hint}: ${message}`, "messages", {
           workspace_id: row.workspace_id,
@@ -147,6 +175,7 @@ export function createSender(ctx) {
       } else {
         row.status = "queued";
         row.next_attempt_at = new Date(Date.now() + BACKOFF_MS[row.attempts]).toISOString();
+        record(row, "retry_scheduled", { text: message });
         logAudit("warn", "message.retry", `Retry ${row.attempts} for ${row.to_hint}: ${message}`, "messages", {
           workspace_id: row.workspace_id,
         });
@@ -156,6 +185,29 @@ export function createSender(ctx) {
     row.updated_at = nowIso();
     broadcast({ type: "change", collection: "messages", event: "updated", id: row.id, row: publicMessage(row) });
     saveDb();
+  }
+
+  /**
+   * Add open and click tracking to marketing mail.
+   *
+   * Only marketing: a one-time passcode or a password reset is not something
+   * to put a tracking pixel in, and doing so would be indefensible. Needs
+   * PUBLIC_BASE_URL, since the links have to be reachable from an inbox.
+   */
+  function withTracking(html, row, stream) {
+    const base = process.env.PUBLIC_BASE_URL;
+    if (!html || !base || !stream.marketing || process.env.SENDITTO_TRACKING === "0") return html;
+    const root = base.replace(/\/$/, "");
+
+    // Rewrite links so a click is recorded and then passed straight on.
+    let out = html.replace(/href\s*=\s*"(https?:\/\/[^"]+)"/gi, (m, url) => {
+      if (url.startsWith(`${root}/t/`)) return m; // already ours
+      return `href="${root}/t/c/${row.id}?u=${encodeURIComponent(url)}"`;
+    });
+
+    const pixel = `<img src="${root}/t/o/${row.id}.gif" width="1" height="1" alt="" style="display:none">`;
+    out = /<\/body>/i.test(out) ? out.replace(/<\/body>/i, `${pixel}</body>`) : out + pixel;
+    return out;
   }
 
   /** A hard bounce must never be mailed again. */
@@ -235,7 +287,7 @@ export function createSender(ctx) {
     timer.unref?.();
   }
 
-  return { enqueue, deliver, tick, start, suppressed, publicMessage, fireWebhooks };
+  return { enqueue, deliver, tick, start, suppressed, publicMessage, fireWebhooks, record };
 }
 
 /** Mask an address for display: never show a full recipient in a list. */

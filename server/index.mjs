@@ -98,6 +98,8 @@ function loadDb() {
   } catch {
     db = seed();
   }
+  if (!Array.isArray(db.message_events)) db.message_events = [];
+  if (!Array.isArray(db.otp_codes)) db.otp_codes = [];
   migratePasswords();
   saveDb();
 }
@@ -137,6 +139,7 @@ function seed() {
     templates: [],
     campaigns: [],
     webhooks: [],
+    message_events: [],
   };
 
   const mkUser = (email, display_name, role, extra = {}) => {
@@ -562,6 +565,7 @@ function tableMeta() {
     ["rights_requests", db.rights, 220],
     ["sessions", db.sessions, 140],
     ["internal_messages", db.internal_messages, 260],
+    ["message_events", db.message_events, 150],
     ["contacts", db.contacts, 150],
     ["templates", db.templates, 340],
     ["campaigns", db.campaigns, 160],
@@ -726,6 +730,7 @@ const COLLECTIONS = {
   campaigns: ["campaigns", "cmp"],
   webhooks: ["webhooks", "wh"],
   "internal-messages": ["internal_messages", "im"],
+  "message-events": ["message_events", "mev"],
 };
 
 /** Roles that operate Senditto itself, as opposed to product customers. */
@@ -872,6 +877,57 @@ async function handle(req, res) {
   }
 
   /* ---------- public ---------- */
+  /* ---------- open & click tracking (public: these are hit from inboxes) ---------- */
+
+  const trackOpen = path.match(/^\/t\/o\/([\w-]+)\.gif$/);
+  if (trackOpen) {
+    const row = db.messages.find((m) => m.id === trackOpen[1]);
+    if (row) {
+      row.opens = (row.opens || 0) + 1;
+      row.updated_at = nowIso();
+      sender.record(row, "opened", { text: req.headers["user-agent"] || null });
+      broadcast({ type: "change", collection: "messages", event: "updated", id: row.id, row: publicMessage(row) });
+      sender.fireWebhooks(row, "message.opened");
+      saveDb();
+    }
+    // A 1x1 transparent GIF, never cached, so every open is counted.
+    const gif = Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64");
+    res.writeHead(200, {
+      "Content-Type": "image/gif",
+      "Content-Length": gif.length,
+      "Cache-Control": "no-store, no-cache, must-revalidate, private",
+      Pragma: "no-cache",
+    });
+    res.end(gif);
+    return;
+  }
+
+  const trackClick = path.match(/^\/t\/c\/([\w-]+)$/);
+  if (trackClick) {
+    const target = url.searchParams.get("u") || "";
+    const row = db.messages.find((m) => m.id === trackClick[1]);
+    // Only ever forward to a normal web address — a tracking link must not
+    // become a way to bounce someone to javascript: or data:.
+    let safe = null;
+    try {
+      const parsed = new URL(target);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") safe = parsed.toString();
+    } catch {
+      safe = null;
+    }
+    if (row && safe) {
+      row.clicks = (row.clicks || 0) + 1;
+      row.updated_at = nowIso();
+      sender.record(row, "clicked", { text: safe });
+      broadcast({ type: "change", collection: "messages", event: "updated", id: row.id, row: publicMessage(row) });
+      sender.fireWebhooks(row, "message.clicked");
+      saveDb();
+    }
+    res.writeHead(302, { Location: safe || process.env.PUBLIC_BASE_URL || "https://senditto.dev", "Cache-Control": "no-store" });
+    res.end();
+    return;
+  }
+
   if (path === "/api/health") {
     send(res, 200, { ok: true, latencyMs: 1 + Math.floor(Math.random() * 4), at: nowIso() });
     return;
@@ -1013,6 +1069,25 @@ async function handle(req, res) {
       expiresAt: session.expires_at,
       purpose: session.purpose,
     });
+    return;
+  }
+
+  /** The full life of one message: every step, in order. */
+  if (path.match(/^\/api\/messages\/[^/]+\/events$/)) {
+    const messageId = path.split("/")[3];
+    const row = db.messages.find((m) => m.id === messageId);
+    if (!row) {
+      send(res, 404, { error: "Message not found" });
+      return;
+    }
+    if (!canUseWorkspace(me, row.workspace_id)) {
+      send(res, 403, { error: "That message is not yours" });
+      return;
+    }
+    const events = (db.message_events || [])
+      .filter((e) => e.message_id === messageId)
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    send(res, 200, { message: publicMessage(row), events });
     return;
   }
 
@@ -1435,6 +1510,7 @@ async function handle(req, res) {
       domains: scoped(db.domains),
       keys: scoped(db.api_keys),
       messages: scoped(db.messages).map(publicMessage),
+      messageEvents: scoped(db.message_events || []).slice(0, 1000),
       suppressions: scoped(db.suppressions).map(publicRow),
       contacts: scoped(db.contacts).map(publicRow),
       templates: scoped(db.templates),
@@ -1473,6 +1549,7 @@ async function handle(req, res) {
       rights_requests: db.rights,
       sessions: db.sessions.map(({ token, ...s }) => s),
       internal_messages: db.internal_messages,
+      message_events: db.message_events.map(publicRow),
       contacts: db.contacts,
       templates: db.templates,
       campaigns: db.campaigns,
