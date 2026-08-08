@@ -1343,6 +1343,7 @@ async function handle(req, res) {
       text: body.text,
       html: body.html,
       replyTo: body.replyTo,
+      sendAt: body.sendAt || body.send_at || null,
       meta: { sentBy: me.email },
     });
     if (result.error) {
@@ -1826,6 +1827,43 @@ async function handle(req, res) {
 
     if (method === "POST" && !id) {
       const body = await readBody(req);
+
+      // Sending is the sending engine's job. Creating a message row directly
+      // skipped address validation, stored the recipient unencrypted, and put
+      // the body in a field the sender never reads — which delivered an empty
+      // email. There is one way to send now, and this is it.
+      if (kind === "messages") {
+        if (!mailerReady()) {
+          send(res, 503, {
+            error: "Email delivery is not configured yet. Set SMTP_HOST and SMTP_FROM on the server.",
+          });
+          return;
+        }
+        const workspaceId = body.workspaceId || body.workspace_id || null;
+        if (!canUseWorkspace(me, workspaceId)) {
+          send(res, 403, { error: "That workspace is not yours" });
+          return;
+        }
+        const queued = sender.enqueue({
+          workspaceId,
+          stream: String(body.stream || "transactional").toLowerCase(),
+          from: body.from || body.from_email,
+          to: body.to || body.to_email,
+          subject: body.subject,
+          text: body.text || body.body || body.body_text,
+          html: body.html || body.body_html,
+          replyTo: body.replyTo || body.reply_to,
+          sendAt: body.sendAt || body.send_at || null,
+          meta: { sentBy: me.email },
+        });
+        if (queued.error) {
+          send(res, queued.code || 422, { error: queued.error });
+          return;
+        }
+        send(res, 201, { row: publicMessage(queued.row) });
+        return;
+      }
+
       if (!staff && kind !== "workspaces") {
         const wsId = body.workspaceId || body.workspace_id;
         if (wsId && !ownWorkspaceIds.has(wsId)) {

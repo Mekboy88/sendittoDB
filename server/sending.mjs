@@ -72,6 +72,7 @@ export function createSender(ctx) {
     text,
     html,
     replyTo,
+    sendAt = null,
     meta = {},
   }) {
     if (!isValidEmail(to)) return { error: "Recipient address is invalid", code: 422 };
@@ -80,6 +81,38 @@ export function createSender(ctx) {
     if (!text && !html) return { error: "The message has no content", code: 422 };
     if (suppressed(workspaceId, to)) {
       return { error: "This address is on the suppression list", code: 409 };
+    }
+
+    // You may only send from a domain you have proved you own. Anything else
+    // is spoofing, and receivers will treat it as such.
+    const fromAddress = from || process.env.SMTP_FROM || "";
+    const fromDomain = addressOnly(fromAddress).split("@")[1];
+    if (!fromDomain) return { error: "A valid From address is required", code: 422 };
+    const platformDomain = addressOnly(process.env.SMTP_FROM || "").split("@")[1];
+    if (fromDomain !== platformDomain) {
+      const owned = db.domains.filter(
+        (d) => !workspaceId || d.workspace_id === workspaceId
+      );
+      const match = owned.find((d) => String(d.domain).toLowerCase() === fromDomain);
+      if (!match) {
+        return {
+          error: `Add ${fromDomain} as a sending domain before sending from it.`,
+          code: 422,
+        };
+      }
+      if (!/^verified$/i.test(String(match.status || ""))) {
+        return {
+          error: `${fromDomain} is not verified yet — publish its DNS records and run the check first.`,
+          code: 422,
+        };
+      }
+    }
+
+    let scheduledFor = null;
+    if (sendAt) {
+      const when = new Date(sendAt);
+      if (Number.isNaN(when.getTime())) return { error: "That send time is not a valid date", code: 422 };
+      if (when.getTime() > Date.now() + 60_000) scheduledFor = when.toISOString();
     }
 
     const ws = db.workspaces.find((w) => w.id === workspaceId) || null;
@@ -97,7 +130,10 @@ export function createSender(ctx) {
       reply_to: replyTo || "",
       status: "queued",
       attempts: 0,
-      next_attempt_at: nowIso(),
+      // Scheduling is just a later first attempt — the queue already refuses
+      // to touch anything before its next_attempt_at.
+      scheduled_for: scheduledFor,
+      next_attempt_at: scheduledFor || nowIso(),
       last_error: null,
       provider_response: null,
       dkim_signed: false,
@@ -109,7 +145,7 @@ export function createSender(ctx) {
       sent_at: null,
     };
     db.messages.unshift(row);
-    record(row, "queued");
+    record(row, scheduledFor ? "scheduled" : "queued", scheduledFor ? { text: `for ${scheduledFor}` } : {});
     logAudit("info", "message.queued", `Queued ${STREAMS[stream].label} to ${row.to_hint}`, "messages", {
       workspace_id: workspaceId,
     });
@@ -332,6 +368,7 @@ export function publicMessage(row) {
     to_email: row.to_hint || hint(decrypt(row.to_email)),
     subject: decrypt(row.subject),
     status: row.status,
+    scheduledFor: row.scheduled_for || null,
     attempts: row.attempts,
     last_error: row.last_error,
     provider_response: row.provider_response,
