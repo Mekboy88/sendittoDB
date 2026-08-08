@@ -1335,13 +1335,34 @@ async function handle(req, res) {
 
   /* ---------------- sending ---------------- */
 
-  /** What the delivery pipeline is capable of right now. */
+  /**
+   * What the delivery pipeline can do for whoever is asking. Scoped to the
+   * caller's workspace: a customer should not learn how much mail the rest of
+   * the platform has in flight.
+   */
   if (path === "/api/send/status") {
+    const scope = resolveWorkspace(me, url.searchParams.get("workspaceId"));
+    if (scope.error) {
+      send(res, scope.code, { error: scope.error });
+      return;
+    }
+    const mine = scope.workspaceId
+      ? db.messages.filter((m) => m.workspace_id === scope.workspaceId)
+      : db.messages;
+    const domains = (scope.workspaceId
+      ? db.domains.filter((d) => d.workspace_id === scope.workspaceId)
+      : db.domains
+    ).filter((d) => /^verified$/i.test(String(d.status || "")));
     send(res, 200, {
       mailer: mailerStatus(),
       encryptionAtRest: encryptionReady(),
       streams: Object.entries(STREAMS).map(([id, s]) => ({ id, ...s })),
-      queued: db.messages.filter((m) => m.status === "queued").length,
+      queued: mine.filter((m) => m.status === "queued").length,
+      // Everyone may send from the platform's own address. Without this a new
+      // account has no sender at all and cannot send a single message until
+      // they have bought a domain and waited for DNS.
+      defaultSender: mailerStatus().from || "",
+      verifiedDomains: domains.map((d) => d.domain),
     });
     return;
   }
